@@ -92,48 +92,53 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
         return;
     }
 
-    // 【关键修复】每次 surface 创建都彻底重建 ImGui Context
-    // 不再尝试保留旧 Context，避免切后台再切回后窗口消失
-    if (g_Initialized) {
-        __android_log_print(ANDROID_LOG_INFO, "IMGUI", "Destroying old ImGui context for full rebuild");
+    if (!g_Initialized) {
+        // === 首次初始化：创建 ImGui Context + 后端 ===
+        __android_log_print(ANDROID_LOG_INFO, "IMGUI", "First time initialization");
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+
+        io.IniFilename = NULL;
+        ImGui::StyleColorsClassic();
+
+        ImGui_ImplAndroid_Init(nativeWindow);
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+
+        if (zt_ttf_len > 0) {
+            ImFont* font = io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 45.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+            IM_ASSERT(font != NULL);
+        } else {
+            __android_log_print(ANDROID_LOG_ERROR, "IMGUI", "Embedded font data is empty");
+        }
+
+        ImGui::GetStyle().ScaleAllSizes(3.0f);
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding = 5.3f;
+        style.FrameRounding = 2.3f;
+        style.ScrollbarRounding = 0;
+
+        g_Initialized = true;
+        __android_log_print(ANDROID_LOG_INFO, "IMGUI", "First init success");
+    } else {
+        // === 重新初始化：EGL Context 丢失后（切后台再切回）===
+        // 保留 ImGui Context（窗口状态不丢），只重建 OpenGL 和 Android 后端
+        __android_log_print(ANDROID_LOG_INFO, "IMGUI", "Re-initializing backends after EGL context loss");
+
+        // 销毁旧后端（OpenGL 资源已随 EGL Context 丢失，这里只清理内部状态）
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplAndroid_Shutdown();
-        ImGui::DestroyContext();
-        g_Initialized = false;
-        g_window = NULL; // 清除悬空指针，避免访问已释放的窗口
+
+        // 重新初始化后端（使用新的 ANativeWindow）
+        ImGui_ImplAndroid_Init(nativeWindow);
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+
+        // 清除悬空指针，DrawFloatingWindow 会在下一帧重新赋值
+        g_window = NULL;
+
+        __android_log_print(ANDROID_LOG_INFO, "IMGUI", "Backends re-initialized, window state preserved");
     }
-
-    // 全新创建 ImGui Context + 后端
-    __android_log_print(ANDROID_LOG_INFO, "IMGUI", "Creating new ImGui context");
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-
-    io.IniFilename = NULL; // 禁用保存 ini 文件
-    ImGui::StyleColorsClassic(); // 设置经典风格
-
-    // 初始化 ImGui 的 Android 和 OpenGL 后端
-    ImGui_ImplAndroid_Init(nativeWindow);
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-
-    // 使用嵌入的字体数据
-    if (zt_ttf_len > 0) {
-        ImFont* font = io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 45.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
-        IM_ASSERT(font != NULL); // 确保字体加载成功
-    } else {
-        __android_log_print(ANDROID_LOG_ERROR, "IMGUI", "Embedded font data is empty");
-    }
-
-    // 样式调整
-    ImGui::GetStyle().ScaleAllSizes(3.0f); // 放大样式比例
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 5.3f;
-    style.FrameRounding = 2.3f;
-    style.ScrollbarRounding = 0;
-
-    g_Initialized = true;
-    __android_log_print(ANDROID_LOG_INFO, "IMGUI", "ImGui context created successfully");
 }
 
 JNIEXPORT void JNICALL
