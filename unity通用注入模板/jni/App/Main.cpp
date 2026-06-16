@@ -780,14 +780,16 @@ void* native_thread_func(void *arg) {
     
     LOGI("========== ✓✓✓ ImGui视图初始化成功 ==========");
     LOGI("✓ ImGui已成功注入并初始化！");
-    LOGI("✓ 进入监控循环，检测 View 脱离并自动重建");
+    LOGI("✓ 进入监控循环，检测 View 脱离/渲染停滞并自动重建");
     
     // ========================================================================
-    // 【关键修复】监控循环：检测 ImGui View 是否被 Unity 移除
-    // Unity 应用切后台再切回时，会重建 ContentView，导致我们 addView 上去的
-    // GLES3JNIView 被移除（触发 onDetachedFromWindow）。此循环定期调用
-    // ImGui.rebuildViewIfNeeded()，检测到 View 脱离后自动重新创建并 addView。
-    // 这就是"一直重建窗口"的策略。
+    // 【关键修复】监控循环：检测 ImGui View 是否被 Unity 移除 或 渲染停滞
+    // Unity 应用切后台再切回时，可能：
+    //   1. 重建 ContentView 导致 GLES3JNIView 被移除（onDetachedFromWindow）
+    //   2. GLSurfaceView 渲染线程卡死，EGL Context 丢失后不恢复
+    // 此循环每秒调用 ImGui.rebuildViewIfNeeded()，Java 层会检测：
+    //   - display 为 null 或 detached → 重建
+    //   - frameCounter 连续 5 秒不增长（渲染停滞）→ 重建
     // ========================================================================
     JNIEnv *env = getJNIEnv();
     if (!env || !g_ImGuiClass) {
@@ -796,33 +798,33 @@ void* native_thread_func(void *arg) {
     }
     
     jmethodID rebuildMethod = env->GetStaticMethodID(
-        g_ImGuiClass, "rebuildViewIfNeeded", "()Z"
+        g_ImGuiClass, "rebuildViewIfNeeded", "()I"
     );
     if (!rebuildMethod) {
         LOGE("❌ 找不到 rebuildViewIfNeeded 方法");
         env->ExceptionClear();
         return nullptr;
     }
-    LOGI("✓ 找到 rebuildViewIfNeeded 方法，开始监控");
+    LOGI("✓ 找到 rebuildViewIfNeeded 方法，开始监控（间隔 1 秒）");
     
     int rebuildCount = 0;
     while (true) {
-        sleep(3); // 每 3 秒检查一次
+        sleep(1); // 每 1 秒检查一次
         
         JNIEnv *loopEnv = getJNIEnv();
         if (!loopEnv || !g_ImGuiClass) {
             continue;
         }
         
-        jboolean rebuilt = loopEnv->CallStaticBooleanMethod(g_ImGuiClass, rebuildMethod);
+        jint result = loopEnv->CallStaticIntMethod(g_ImGuiClass, rebuildMethod);
         if (loopEnv->ExceptionCheck()) {
             loopEnv->ExceptionClear();
             continue;
         }
         
-        if (rebuilt == JNI_TRUE) {
-            rebuildCount++;
-            LOGI("🔄 [监控] 检测到 ImGui View 脱离，已触发重建 (第 %d 次)", rebuildCount);
+        if (result > 0) {
+            rebuildCount += result;
+            LOGI("🔄 [监控] 触发 View 重建 (累计 %d 次)", rebuildCount);
         }
     }
     
