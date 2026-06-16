@@ -70,6 +70,7 @@ bool check_and_create_init_flag() {
 JavaVM *g_JavaVM = nullptr;
 jobject g_ActivityInstance = nullptr;
 jobject g_MainLooperHandler = nullptr;
+jclass g_ImGuiClass = nullptr; // 保存 ImGui 类的全局引用，供监控线程使用
 
 static pthread_mutex_t g_InitMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -526,6 +527,10 @@ jclass loadImGuiClassFromDex() {
         
         LOGI("✓ ImGui类加载成功: %p", imguiClass);
         
+        // 保存全局引用，供监控线程使用
+        g_ImGuiClass = (jclass)env->NewGlobalRef(imguiClass);
+        LOGI("✓ 已保存 ImGui 类全局引用: %p", g_ImGuiClass);
+        
         env->DeleteLocalRef(classNameStr);
         env->DeleteLocalRef(libraryPath);
         env->DeleteLocalRef(optimizedDir);
@@ -775,7 +780,51 @@ void* native_thread_func(void *arg) {
     
     LOGI("========== ✓✓✓ ImGui视图初始化成功 ==========");
     LOGI("✓ ImGui已成功注入并初始化！");
-    LOGI("✓ 所有操作完成！\n");
+    LOGI("✓ 进入监控循环，检测 View 脱离并自动重建");
+    
+    // ========================================================================
+    // 【关键修复】监控循环：检测 ImGui View 是否被 Unity 移除
+    // Unity 应用切后台再切回时，会重建 ContentView，导致我们 addView 上去的
+    // GLES3JNIView 被移除（触发 onDetachedFromWindow）。此循环定期调用
+    // ImGui.rebuildViewIfNeeded()，检测到 View 脱离后自动重新创建并 addView。
+    // 这就是"一直重建窗口"的策略。
+    // ========================================================================
+    JNIEnv *env = getJNIEnv();
+    if (!env || !g_ImGuiClass) {
+        LOGE("❌ 监控循环启动失败：无法获取 JNI 环境或 ImGui 类");
+        return nullptr;
+    }
+    
+    jmethodID rebuildMethod = env->GetStaticMethodID(
+        g_ImGuiClass, "rebuildViewIfNeeded", "()Z"
+    );
+    if (!rebuildMethod) {
+        LOGE("❌ 找不到 rebuildViewIfNeeded 方法");
+        env->ExceptionClear();
+        return nullptr;
+    }
+    LOGI("✓ 找到 rebuildViewIfNeeded 方法，开始监控");
+    
+    int rebuildCount = 0;
+    while (true) {
+        sleep(3); // 每 3 秒检查一次
+        
+        JNIEnv *loopEnv = getJNIEnv();
+        if (!loopEnv || !g_ImGuiClass) {
+            continue;
+        }
+        
+        jboolean rebuilt = loopEnv->CallStaticBooleanMethod(g_ImGuiClass, rebuildMethod);
+        if (loopEnv->ExceptionCheck()) {
+            loopEnv->ExceptionClear();
+            continue;
+        }
+        
+        if (rebuilt == JNI_TRUE) {
+            rebuildCount++;
+            LOGI("🔄 [监控] 检测到 ImGui View 脱离，已触发重建 (第 %d 次)", rebuildCount);
+        }
+    }
     
     return nullptr;
 }
