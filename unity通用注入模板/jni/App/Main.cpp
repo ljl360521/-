@@ -807,15 +807,29 @@ void* native_thread_func(void *arg) {
     }
     LOGI("✓ 找到 rebuildViewIfNeeded 方法，开始监控（间隔 1 秒）");
     
+    // forceRebuild 方法：无条件强制重建（兜底）
+    jmethodID forceRebuildMethod = env->GetStaticMethodID(
+        g_ImGuiClass, "forceRebuild", "()I"
+    );
+    if (forceRebuildMethod) {
+        LOGI("✓ 找到 forceRebuild 方法");
+    } else {
+        env->ExceptionClear();
+        LOGW("⚠️  找不到 forceRebuild 方法（非致命）");
+    }
+    
     int rebuildCount = 0;
+    int tick = 0;
     while (true) {
         sleep(1); // 每 1 秒检查一次
+        tick++;
         
         JNIEnv *loopEnv = getJNIEnv();
         if (!loopEnv || !g_ImGuiClass) {
             continue;
         }
         
+        // 检测式重建
         jint result = loopEnv->CallStaticIntMethod(g_ImGuiClass, rebuildMethod);
         if (loopEnv->ExceptionCheck()) {
             loopEnv->ExceptionClear();
@@ -824,7 +838,17 @@ void* native_thread_func(void *arg) {
         
         if (result > 0) {
             rebuildCount += result;
-            LOGI("🔄 [监控] 触发 View 重建 (累计 %d 次)", rebuildCount);
+            LOGI("🔄 [监控] 检测式重建触发 (累计 %d 次)", rebuildCount);
+        }
+        
+        // 兜底：每 15 秒无条件强制重建一次，确保即使检测逻辑失效也能恢复
+        if (forceRebuildMethod && (tick % 15) == 0) {
+            LOGI("🔄 [监控] 定时强制重建 (tick=%d)", tick);
+            loopEnv->CallStaticIntMethod(g_ImGuiClass, forceRebuildMethod);
+            if (loopEnv->ExceptionCheck()) {
+                loopEnv->ExceptionClear();
+            }
+            rebuildCount++;
         }
     }
     
