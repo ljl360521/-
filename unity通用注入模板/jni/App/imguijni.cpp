@@ -137,64 +137,9 @@ Java_com_example_imgui_GLES3JNIView_resize(JNIEnv* env, jobject obj, jint width,
 }
 
 void DrawFloatingWindow() {
-    // 设置悬浮窗口位置和大小，动态适配屏幕
-    float windowWidth = screenWidth * 0.8f;
-    float windowHeight = screenHeight * 0.6f;
-    ImGui::SetNextWindowPos(ImVec2(screenWidth * 0.1f, screenHeight * 0.2f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(windowWidth, windowHeight), ImGuiCond_FirstUseEver);
-
-    // 关键修复来自已修好版本的逻辑：ScaleAllSizes(3.0f) 会把 style.WindowMinSize 放大，
-    // 手动缩放到较小尺寸时 ImGui 会被最小尺寸反复拉回，表现为一卡一卡。
-    // 绘制窗口前显式降低最小尺寸，并设置窗口尺寸约束，让 ResizeGrip 连续跟手。
-    ImVec2 minSize(58.0f, ImGui::GetFrameHeight());
-    ImGui::GetStyle().WindowMinSize = minSize;
-    ImGui::SetNextWindowSizeConstraints(minSize, ImVec2(FLT_MAX, FLT_MAX));
-
-    ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::Begin("可一定", nullptr, windowFlags)) {
-        g_window = ImGui::GetCurrentWindow();
-
-        // 标签页
-        if (ImGui::BeginTabBar("##main_tabs", ImGuiTabBarFlags_None)) {
-            // 光环 UI 标签页（Mac 风格毛玻璃 UI）
-            if (ImGui::BeginTabItem("\xe5\x85\x89\xe7\x8e\xafUI")) {
-                aura_ui::render_aura_tab();
-                ImGui::EndTabItem();
-            }
-
-            // 设置标签页（UI 大小控制）
-            if (ImGui::BeginTabItem("\xe8\xae\xbe\xe7\xbd\xae")) {
-                // 基础样式在首次进入时捕获，作为缩放基准
-                static float ui_scale = 1.0f;
-                static ImGuiStyle base_style;
-                static bool base_captured = false;
-                if (!base_captured) {
-                    base_style = ImGui::GetStyle();
-                    base_captured = true;
-                }
-
-                ImGui::TextUnformatted("UI \xe8\xae\xbe\xe7\xbd\xae");
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                // UI 整体大小滑块（同时缩放字体和样式尺寸）
-                if (ImGui::SliderFloat("UI \xe5\xa4\xa7\xe5\xb0\x8f", &ui_scale, 0.5f, 2.0f, "%.2fx")) {
-                    ImGuiStyle& style = ImGui::GetStyle();
-                    style = base_style;
-                    style.ScaleAllSizes(ui_scale);
-                    ImGui::GetIO().FontGlobalScale = ui_scale;
-                }
-                ImGui::Spacing();
-                ImGui::TextUnformatted("\xe6\x8b\x96\xe5\x8a\xa8\xe6\xbb\x91\xe5\x9d\x97\xe8\xb0\x83\xe6\x95\xb4 UI \xe6\x95\xb4\xe4\xbd\x93\xe5\xa4\xa7\xe5\xb0\x8f");
-                ImGui::Text("\xe5\xbd\x93\xe5\x89\x8d\xe7\xbc\xa9\xe6\x94\xbe: %.2f \xe5\x80\x8d", ui_scale);
-
-                ImGui::EndTabItem();
-            }
-
-            ImGui::EndTabBar();
-        }
-    }
-    ImGui::End();
+    // 直接渲染 AuraNexus Mac 风格毛玻璃 UI（完整窗口，包含 Begin/End）
+    // 替换掉原项目的整个悬浮窗口结构
+    aura_ui::render_window();
 }
 
 JNIEXPORT void JNICALL

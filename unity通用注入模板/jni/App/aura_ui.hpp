@@ -13,8 +13,9 @@ namespace aura_ui {
 // 初始化（应用 Mac 风格样式）
 void init();
 
-// 主渲染入口（三栏布局 + 标签页）
-void render_aura_tab();
+// 完整窗口渲染入口（替换原项目的整个悬浮窗口）
+// 包含 ImGui::Begin/End + 菜单展开动画 + 三栏布局 + 3 个标签页
+void render_window();
 
 // ---- 自定义 widget（移植自 imgui_widgets.cpp）----
 // 带图标和副标题的按钮（图标用文字代替）

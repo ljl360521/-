@@ -709,130 +709,210 @@ static float get_gpu() {
 }
 
 // ============================================================================
-// render_aura_tab - 主渲染（三栏布局 + 3 个标签页）
-// 完美还原原项目 MainUI.h 的布局结构
+// render_window - 完整窗口渲染
+// 完美还原原项目 MainUI.h 的每一行：菜单展开动画 + 窗口 Begin/End +
+// 三栏布局（顶部卡片 + 左侧标签栏 + 右侧内容区）+ 3 个标签页
 // ============================================================================
-void render_aura_tab() {
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+void render_window() {
+    // === 菜单展开动画（原项目 MainUI.h 第 1-19 行）===
+    // 原项目用 MainAuraOne（音量键切换）控制，这里菜单始终展开
+    static bool MainAuraOne = true;
+    static bool last_menu_state = false;
+    static float menu_expand = 0.0f;
 
-    // 标签页状态
-    static int tab_main = 1;
-    static int prev_tab_main = 1;
+    if (MainAuraOne) {
+        if (!last_menu_state) last_menu_state = true;
+        float delta = ImGui::GetIO().DeltaTime;
+        menu_expand += (1.0f - menu_expand) * delta * 12.0f;
+        menu_expand = fminf(1.0f, menu_expand);
+    } else {
+        if (last_menu_state) last_menu_state = false;
+        float delta = ImGui::GetIO().DeltaTime;
+        menu_expand += (0.0f - menu_expand) * delta * 15.0f;
+        menu_expand = fmaxf(0.0f, menu_expand);
+    }
+    if (menu_expand < 0.01f && !MainAuraOne) {
+        return;
+    }
+
+    float width_factor = menu_expand;
+    float min_width = 2.0f;
+
+    // 窗口尺寸：原项目固定 1200x800，这里根据屏幕自适应（大屏保持 1200x800）
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    float max_w = viewport->Size.x * 0.92f;
+    float max_h = viewport->Size.y * 0.88f;
+    float target_w = fminf(1200.0f, max_w);
+    float target_h = fminf(800.0f, max_h);
+    float current_width = min_width + (target_w - min_width) * width_factor;
+
+    // === 标签切换动画（原项目 MainUI.h 第 23-39 行）===
+    static int Tab_Main = 1;
+    static int prev_Tab_Main = 1;
     static float tab_alpha = 1.0f;
-    static bool tab_animating = false;
-
-    // 标签切换动画
-    if (prev_tab_main != tab_main) {
-        tab_animating = true;
+    static bool tab_is_animating = false;
+    if (prev_Tab_Main != Tab_Main) {
+        tab_is_animating = true;
         tab_alpha = 0.0f;
-        prev_tab_main = tab_main;
+        prev_Tab_Main = Tab_Main;
     }
-    if (tab_animating) {
+    if (tab_is_animating) {
         tab_alpha += ImGui::GetIO().DeltaTime * 2.0f;
-        if (tab_alpha >= 1.0f) { tab_alpha = 1.0f; tab_animating = false; }
+        if (tab_alpha >= 1.0f) {
+            tab_alpha = 1.0f;
+            tab_is_animating = false;
+        }
     }
 
-    // === 顶部卡片（带 LOGO 的 ButtonWithIcon）===
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    // === 窗口样式（原项目 MainUI.h 第 40-53 行）===
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.0f, 1.0f, 1.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 40.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    if (ImGui::BeginChild("##AuraTopCard", ImVec2(-1, 100), false, ImGuiWindowFlags_NoScrollbar)) {
-        ImVec2 child_pos = ImGui::GetWindowPos();
-        ImVec2 child_size = ImGui::GetWindowSize();
-        // 半透明白色背景 + 顶部圆角
-        draw_list->AddRectFilled(child_pos,
-            ImVec2(child_pos.x + child_size.x, child_pos.y + child_size.y),
-            mac::GLASS_BG, mac::ROUND_LARGE, ImDrawFlags_RoundCornersTop);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+    ImGuiWindowFlags mainWindowFlags = ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove;
 
-        ImGui::SetCursorPosX(10.0f);
-        ImGui::SetCursorPosY(10.0f);
-        float card_w = ImGui::GetContentRegionAvail().x - 10.0f;
-        float card_h = ImGui::GetContentRegionAvail().y - 10.0f;
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-        if (ImGui::BeginChild("##AuraTopInner", ImVec2(card_w, card_h), false, ImGuiWindowFlags_NoScrollbar)) {
-            if (ButtonWithIcon("\xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a",
-                               "Unity \xe9\x80\x9a\xe7\x94\xa8\xe6\xb3\xa8\xe5\x85\xa5\xe6\xa8\xa1\xe6\x9d\xbf",
-                               ImVec2(-1, -1))) {
-                // 点击无操作
+    ImVec2 window_pos = ImVec2(
+        (viewport->Pos.x + viewport->Size.x * 0.5f) - (current_width * 0.5f),
+        (viewport->Pos.y + viewport->Size.y * 0.5f) - (target_h * 0.5f));
+    ImVec2 window_size = ImVec2(current_width, target_h);
+    ImGui::SetNextWindowPos(window_pos);
+    ImGui::SetNextWindowSize(ImVec2(current_width, target_h));
+
+    // 毛玻璃背景（原项目用 UpdateBlurWindow，这里用半透明深色背景模拟）
+    {
+        ImDrawList* bg_dl = ImGui::GetBackgroundDrawList();
+        ImU32 blur_col = IM_COL32(15, 15, 20, (int)(200 * width_factor));
+        bg_dl->AddRectFilled(window_pos,
+            ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
+            blur_col, 40.0f);
+    }
+
+    float content_alpha = fminf(1.0f, (width_factor - 0.2f) / 0.6f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, content_alpha);
+
+    if (ImGui::Begin("\xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a", nullptr, mainWindowFlags)) {
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        // === 顶部卡片（原项目 MainUI.h 第 56-78 行）===
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard1", ImVec2(-1, 100), false, ImGuiWindowFlags_NoScrollbar);
+        {
+            ImVec2 child_pos = ImGui::GetWindowPos();
+            ImVec2 child_size = ImGui::GetWindowSize();
+            draw_list->AddRectFilled(child_pos,
+                ImVec2(child_pos.x + child_size.x, child_pos.y + child_size.y),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)),
+                40.0f, ImDrawFlags_RoundCornersTop);
+
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::SetCursorPosX(10.0f); ImGui::SetCursorPosY(10.0f);
+            float CardWidth1 = ImGui::GetContentRegionAvail().x - 10.0f;
+            float CardHeight1 = ImGui::GetContentRegionAvail().y - 10.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+            if (ImGui::BeginChild("MainAuraNexusUI_Card1", ImVec2(CardWidth1, CardHeight1), false, ImGuiWindowFlags_NoScrollbar)) {
+                if (ButtonWithIcon("\xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a",
+                                   "Unity \xe9\x80\x9a\xe7\x94\xa8\xe6\xb3\xa8\xe5\x85\xa5\xe6\xa8\xa1\xe6\x9d\xbf",
+                                   ImVec2(300, -1))) { }
             }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
         }
         ImGui::EndChild();
-        ImGui::PopStyleVar();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
 
-    // === 左侧标签栏 + 右侧内容区 ===
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        // === 左侧标签栏（原项目 MainUI.h 第 79-103 行）===
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard2", ImVec2(200, -1), false, ImGuiWindowFlags_NoScrollbar);
+        {
+            ImVec2 child_pos1 = ImGui::GetWindowPos();
+            ImVec2 child_size1 = ImGui::GetWindowSize();
+            draw_list->AddRectFilled(child_pos1,
+                ImVec2(child_pos1.x + child_size1.x, child_pos1.y + child_size1.y),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)),
+                40.0f, ImDrawFlags_RoundCornersBottomLeft);
 
-    // 左侧标签栏（200 宽）
-    if (ImGui::BeginChild("##AuraLeftBar", ImVec2(200, -1), false, ImGuiWindowFlags_NoScrollbar)) {
-        ImVec2 child_pos = ImGui::GetWindowPos();
-        ImVec2 child_size = ImGui::GetWindowSize();
-        draw_list->AddRectFilled(child_pos,
-            ImVec2(child_pos.x + child_size.x, child_pos.y + child_size.y),
-            mac::GLASS_BG, mac::ROUND_LARGE, ImDrawFlags_RoundCornersBottomLeft);
-
-        ImGui::SetCursorPosX(0.0f);
-        ImGui::SetCursorPosY(15.0f);
-        float card_w = ImGui::GetContentRegionAvail().x;
-        float card_h = ImGui::GetContentRegionAvail().y - 10.0f;
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-        if (ImGui::BeginChild("##AuraLeftInner", ImVec2(card_w, card_h), false, ImGuiWindowFlags_NoScrollbar)) {
-            // 三个标签按钮（用文字代替图标）
-            if (ButtonTab("\xe4\xb8\xbb\xe9\xa1\xb5", ImVec2(-1, 80), 1, &tab_main)) {}
-            if (ButtonTab("\xe5\x8a\x9f\xe8\x83\xbd", ImVec2(-1, 80), 2, &tab_main)) {}
-            if (ButtonTab("\xe8\xae\xbe\xe7\xbd\xae", ImVec2(-1, 80), 3, &tab_main)) {}
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::SetCursorPosX(0.0f); ImGui::SetCursorPosY(15.0f);
+            float CardWidth2 = ImGui::GetContentRegionAvail().x;
+            float CardHeight2 = ImGui::GetContentRegionAvail().y - 10.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+            if (ImGui::BeginChild("MainAuraNexusUI_Card2", ImVec2(CardWidth2, CardHeight2), false, ImGuiWindowFlags_NoScrollbar)) {
+                // 三个标签按钮（原项目用 FontAwesome 图标，这里用中文文字）
+                if (ButtonTab("\xe4\xb8\xbb\xe9\xa1\xb5", ImVec2(-1, 80), 1, &Tab_Main)) {}
+                if (ButtonTab("\xe5\x8a\x9f\xe8\x83\xbd", ImVec2(-1, 80), 2, &Tab_Main)) {}
+                if (ButtonTab("\xe8\xae\xbe\xe7\xbd\xae", ImVec2(-1, 80), 3, &Tab_Main)) {}
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
         }
         ImGui::EndChild();
-        ImGui::PopStyleVar();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
 
-    ImGui::SameLine();
+        ImGui::SameLine();
 
-    // 右侧内容区
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    if (ImGui::BeginChild("##AuraContent", ImVec2(-1, -1), false,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground)) {
-        // 左上角圆角装饰（原项目的 PathArcTo 装饰）
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImVec2 o = origin;
-        ImVec2 a = ImVec2(origin.x + 0.5f, origin.y + 40);
-        ImVec2 b = ImVec2(origin.x + 40, origin.y);
-        ImVec2 center = ImVec2(origin.x + 40, origin.y + 40);
-        float radius = 40.0f;
-        draw_list->PathClear();
-        draw_list->PathLineTo(o);
-        draw_list->PathLineTo(a);
-        draw_list->PathArcTo(center, radius, IM_PI, IM_PI * 1.5f, 16);
-        draw_list->PathFillConvex(IM_COL32(255, 255, 255, 32));
+        // === 右侧内容区（原项目 MainUI.h 第 105-265 行）===
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard3", ImVec2(-1, -1), false,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+        {
+            // 左上角圆角装饰（原项目 MainUI.h 第 109-119 行）
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImVec2 o = origin;
+            ImVec2 a = ImVec2(origin.x + 0.5f, origin.y + 40);
+            ImVec2 b = ImVec2(origin.x + 40, origin.y);
+            ImVec2 center = ImVec2(origin.x + 40, origin.y + 40);
+            float radius = 40.0f;
+            draw_list->PathClear();
+            draw_list->PathLineTo(o);
+            draw_list->PathLineTo(a);
+            draw_list->PathArcTo(center, radius, IM_PI, IM_PI * 1.5f, 16);
+            draw_list->PathFillConvex(IM_COL32(255, 255, 255, 128));
 
-        ImGui::SetCursorPosX(10.0f);
-        ImGui::SetCursorPosY(15.0f);
-        float card_w = ImGui::GetContentRegionAvail().x - 10.0f;
-        float card_h = ImGui::GetContentRegionAvail().y - 10.0f;
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, tab_alpha);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::SetCursorPosX(10.0f); ImGui::SetCursorPosY(15.0f);
+            float CardWidth3 = ImGui::GetContentRegionAvail().x - 10.0f;
+            float CardHeight3 = ImGui::GetContentRegionAvail().y - 10.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, tab_alpha);
+            if (ImGui::BeginChild("MainAuraNexusUI_Card3", ImVec2(CardWidth3, CardHeight3), false, ImGuiWindowFlags_NoScrollbar)) {
 
-        if (ImGui::BeginChild("##AuraContentInner", ImVec2(card_w, card_h), false, ImGuiWindowFlags_NoScrollbar)) {
-            // === 标签页 1：主页 ===
-            if (tab_main == 1) {
-                ImGui::Columns(2, nullptr, false);
-                if (BeginGlassCard("##HomeCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                    DrawAuraSectionTitle("\xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf");
-                    ImGui::Spacing();
-                    // 4 个系统信息卡片
-                    DrawSystemInfoCard(SystemInfoType::FPS, get_fps(), ImVec2(-1, 100));
+                // === 标签页 1：主页（原项目 MainUI.h 第 129-163 行）===
+                if (Tab_Main == 1) {
+                    ImGui::Columns(2, nullptr, false);
+                    if (BeginGlassCard("HomeCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                        DrawAuraSectionTitle("\xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf");
+                        ImGui::Spacing();
+                        ImGui::Text("FPS: %d", (int)get_fps());
+                        ImGui::Separator();
+                        ImGui::Text("CPU: %d%%", (int)get_cpu());
+                        ImGui::Text("GPU: %d%%", (int)get_gpu());
+                        ImGui::Text("\xe5\x86\x85\xe5\xad\x98: %d%%", (int)get_ram());
+                        ImGui::Separator();
+                        DrawSystemInfoCard(SystemInfoType::FPS, get_fps(), ImVec2(-1, 100));
+                    }
+                    EndGlassCard();
                     ImGui::NextColumn();
-                    if (BeginGlassCard("##HomeCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    if (BeginGlassCard("HomeCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
                         DrawAuraSectionTitle("\xe9\xa1\xb9\xe7\x9b\xae\xe4\xbf\xa1\xe6\x81\xaf");
                         ImGui::Spacing();
                         ImGui::TextUnformatted("\xe9\xa1\xb9\xe7\x9b\xae: \xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a");
@@ -841,98 +921,101 @@ void render_aura_tab() {
                         ImGui::Separator();
                         ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
                         ImGui::Separator();
-                        const char* modes[] = {"\xe6\x9c\x89\xe5\x90\x8e\xe5\x8f\xb0", "\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0"};
-                        static int bg_mode = 0;
-                        HorizontalToggleBar("\xe5\x90\x8e\xe5\x8f\xb0\xe8\xae\xbe\xe7\xbd\xae", &bg_mode, modes, 2);
-                    }
-                    EndGlassCard();
-                    ImGui::NextColumn();
-                    if (BeginGlassCard("##HomeCard3", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe6\x80\xa7\xe8\x83\xbd\xe7\x9b\x91\xe6\x8e\xa7");
-                        ImGui::Spacing();
-                        DrawSystemInfoCard(SystemInfoType::CPU, get_cpu(), ImVec2(95, 95));
-                        ImGui::SameLine();
-                        DrawSystemInfoCard(SystemInfoType::GPU, get_gpu(), ImVec2(95, 95));
-                        ImGui::SameLine();
-                        DrawSystemInfoCard(SystemInfoType::RAM, get_ram(), ImVec2(95, 95));
+                        const char* Antirecordingscreen[] = {"\xe5\x8f\xaf\xe5\xbd\x95\xe5\xb1\x8f", "\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f"};
+                        static int Prevent = 0;
+                        HorizontalToggleBar("\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f\xe8\xae\xbe\xe7\xbd\xae", &Prevent, Antirecordingscreen, 2);
                     }
                     EndGlassCard();
                     ImGui::Columns(1);
                 }
-                EndGlassCard();
+                // === 标签页 2：功能（原项目 MainUI.h 第 164-228 行）===
+                else if (Tab_Main == 2) {
+                    ImGui::Columns(2, nullptr, false);
+                    if (BeginGlassCard("LB_Card1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                        DrawAuraSectionTitle("\xe5\x8a\x9f\xe8\x83\xbd\xe5\xbc\x80\xe5\x85\xb3");
+                        ImGui::Spacing();
+                        static bool feat1 = false, feat2 = false, feat3 = false, feat4 = false;
+                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x80", &feat1)) {}
+                        ImGui::Separator();
+                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xba\x8c", &feat2)) {}
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
+                        static float hv = 90.0f;
+                        if (ImGui::SliderFloat("##head", &hv, 50, 150)) {}
+                        ImGui::Separator();
+                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x89", &feat3)) {}
+                        ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
+                        static float bv = 80.0f;
+                        if (ImGui::SliderFloat("##body", &bv, 50, 150)) {}
+                        ImGui::Separator();
+                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe5\x9b\x9b", &feat4)) {}
+                        ImGui::Separator();
+                        static float slider1 = 0.5f;
+                        ImGui::SliderFloat("\xe6\x95\xb0\xe5\x80\xbc\xe8\xb0\x83\xe8\x8a\x82", &slider1, 0.0f, 1.0f);
+                    }
+                    EndGlassCard();
+                    ImGui::NextColumn();
+                    if (BeginGlassCard("LB_Card2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                        DrawAuraSectionTitle("\xe9\xab\x98\xe7\xba\xa7\xe9\x80\x89\xe9\xa1\xb9");
+                        ImGui::Spacing();
+                        const char* modes[] = {"\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x80", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xba\x8c", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x89"};
+                        static int mode = 0;
+                        HorizontalToggleBar("\xe8\xbf\x90\xe8\xa1\x8c\xe6\xa8\xa1\xe5\xbc\x8f", &mode, modes, 3);
+                        ImGui::Separator();
+                        const char* modes2[] = {"\xe5\xbc\x80", "\xe5\x85\xb3"};
+                        static int mode2 = 0;
+                        HorizontalToggleBar("\xe8\xb0\x83\xe8\xaf\x95\xe6\xa8\xa1\xe5\xbc\x8f", &mode2, modes2, 2);
+                    }
+                    EndGlassCard();
+                    ImGui::Columns(1);
+                }
+                // === 标签页 3：设置（原项目 MainUI.h 第 229-257 行）===
+                else if (Tab_Main == 3) {
+                    ImGui::Columns(2, nullptr, false);
+                    if (BeginGlassCard("SetCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                        DrawAuraSectionTitle("\xe6\x98\xbe\xe7\xa4\xba\xe8\xae\xbe\xe7\xbd\xae");
+                        ImGui::Spacing();
+                        static float FPSControlSize = 60.0f;
+                        ImGui::SliderFloat("\xe5\xb8\xa7\xe7\x8e\x87", &FPSControlSize, 0.0f, 165.0f, "%.0f");
+                        ImGui::Separator();
+                        static float blur_strength = 0.8f;
+                        ImGui::SliderFloat("\xe6\xa8\xa1\xe7\xb3\x8a\xe5\xbc\xba\xe5\xba\xa6", &blur_strength, 0, 1, "%.1f");
+                        ImGui::Separator();
+                        const char* background_modes[] = {"\xe6\x9c\x89\xe5\x90\x8e\xe5\x8f\xb0", "\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0"};
+                        static int background_mode = 0;
+                        HorizontalToggleBar("\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0\xe8\xae\xbe\xe7\xbd\xae", &background_mode, background_modes, 2);
+                    }
+                    EndGlassCard();
+                    ImGui::NextColumn();
+                    if (BeginGlassCard("SetCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                        DrawAuraSectionTitle("\xe7\xbb\x98\xe5\x9b\xbe\xe8\xae\xbe\xe7\xbd\xae");
+                        ImGui::Spacing();
+                        static float ImGuiDrawESP = 0.7f;
+                        ImGui::SliderFloat("\xe4\xba\xba\xe7\x89\xa9\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP, 0.3f, 1.5f, "%.1f");
+                        ImGui::Separator();
+                        static float ImGuiDrawESP2 = 0.7f;
+                        ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3f, 1.5f, "%.1f");
+                        ImGui::Separator();
+                        if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
+                        ImGui::Separator();
+                        if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
+                    }
+                    EndGlassCard();
+                    ImGui::Columns(1);
+                }
+                ImGui::PopStyleVar(); // PopStyleVar(1) for Alpha
             }
-            // === 标签页 2：功能 ===
-            else if (tab_main == 2) {
-                ImGui::Columns(2, nullptr, false);
-                if (BeginGlassCard("##FuncCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                    DrawAuraSectionTitle("\xe5\x8a\x9f\xe8\x83\xbd\xe5\xbc\x80\xe5\x85\xb3");
-                    ImGui::Spacing();
-                    static bool feat1 = false, feat2 = false, feat3 = false, feat4 = false;
-                    ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x80", &feat1);
-                    ImGui::Separator();
-                    ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xba\x8c", &feat2);
-                    ImGui::Separator();
-                    ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x89", &feat3);
-                    ImGui::Separator();
-                    ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe5\x9b\x9b", &feat4);
-                    ImGui::Separator();
-                    static float slider1 = 0.5f;
-                    ImGui::SliderFloat("\xe6\x95\xb0\xe5\x80\xbc\xe8\xb0\x83\xe8\x8a\x82", &slider1, 0.0f, 1.0f);
-                }
-                EndGlassCard();
-                ImGui::NextColumn();
-                if (BeginGlassCard("##FuncCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                    DrawAuraSectionTitle("\xe9\xab\x98\xe7\xba\xa7\xe9\x80\x89\xe9\xa1\xb9");
-                    ImGui::Spacing();
-                    const char* modes[] = {"\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x80", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xba\x8c", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x89"};
-                    static int mode = 0;
-                    HorizontalToggleBar("\xe8\xbf\x90\xe8\xa1\x8c\xe6\xa8\xa1\xe5\xbc\x8f", &mode, modes, 3);
-                    ImGui::Separator();
-                    const char* modes2[] = {"\xe5\xbc\x80", "\xe5\x85\xb3"};
-                    static int mode2 = 0;
-                    HorizontalToggleBar("\xe8\xb0\x83\xe8\xaf\x95\xe6\xa8\xa1\xe5\xbc\x8f", &mode2, modes2, 2);
-                }
-                EndGlassCard();
-                ImGui::Columns(1);
-            }
-            // === 标签页 3：设置 ===
-            else if (tab_main == 3) {
-                ImGui::Columns(2, nullptr, false);
-                if (BeginGlassCard("##SetCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                    DrawAuraSectionTitle("\xe6\x98\xbe\xe7\xa4\xba\xe8\xae\xbe\xe7\xbd\xae");
-                    ImGui::Spacing();
-                    static float fps_limit = 60.0f;
-                    ImGui::SliderFloat("\xe5\xb8\xa7\xe7\x8e\x87\xe9\x99\x90\xe5\x88\xb6", &fps_limit, 30.0f, 165.0f, "%.0f");
-                    ImGui::Separator();
-                    static float ui_scale = 1.0f;
-                    ImGui::SliderFloat("UI \xe7\xbc\xa9\xe6\x94\xbe", &ui_scale, 0.5f, 2.0f, "%.2f");
-                    ImGui::Separator();
-                    const char* bg_modes[] = {"\xe6\x9c\x89\xe5\x90\x8e\xe5\x8f\xb0", "\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0"};
-                    static int bg_mode = 0;
-                    HorizontalToggleBar("\xe5\x90\x8e\xe5\x8f\xb0\xe8\xae\xbe\xe7\xbd\xae", &bg_mode, bg_modes, 2);
-                }
-                EndGlassCard();
-                ImGui::NextColumn();
-                if (BeginGlassCard("##SetCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                    DrawAuraSectionTitle("\xe7\xbb\x98\xe5\x9b\xbe\xe8\xae\xbe\xe7\xbd\xae");
-                    ImGui::Spacing();
-                    static float esp_size = 0.7f;
-                    ImGui::SliderFloat("\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &esp_size, 0.3f, 1.5f, "%.1f");
-                    ImGui::Separator();
-                    if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
-                    ImGui::Separator();
-                    if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
-                }
-                EndGlassCard();
-                ImGui::Columns(1);
-            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
         }
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
     }
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
+    ImGui::End();
+    ImGui::PopStyleVar(4);
     ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 } // namespace aura_ui
