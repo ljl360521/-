@@ -7,6 +7,7 @@
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
 #include "zt_ttf.h"
+#include "Iconcpp.h"
 #include "aura_ui.hpp"
 #include <string>
 #include <vector>
@@ -41,7 +42,7 @@ static bool get_target_imgui_window_bounds(float outBounds[4]) {
     // 优先使用绘制时记录的目标窗口，避免取到 Debug/Toast 等非目标窗口。
     ImGuiWindow* window = g_window;
     if (window == nullptr || !window->Active) {
-        window = ImGui::FindWindowByName("悬浮窗口");
+        window = ImGui::FindWindowByName("MainAuraNexusUI");
     }
 
     if (window == nullptr || !window->Active || window->Hidden) {
@@ -92,8 +93,7 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
 
-    io.IniFilename = NULL; // 禁用保存 ini 文件
-    ImGui::StyleColorsClassic(); // 设置经典风格
+    io.IniFilename = NULL; // 禁用保存 ini 文件（原版 draw.cpp ImGui_init 无 StyleColors 调用，用默认 Dark）
 
     // 获取 ANativeWindow 对象
     ANativeWindow* nativeWindow = ANativeWindow_fromSurface(env, surface);
@@ -106,22 +106,26 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     ImGui_ImplAndroid_Init(nativeWindow);
     ImGui_ImplOpenGL3_Init("#version 300 es");
 
-    // 使用嵌入的字体数据
-    if (zt_ttf_len > 0) {
-        ImFont* font = io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 45.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
-        IM_ASSERT(font != NULL); // 确保字体加载成功
-    } else {
-        __android_log_print(ANDROID_LOG_ERROR, "IMGUI", "Embedded font data is empty");
-    }
+    // 字体加载（严格按原版 draw.cpp ImGui_init 移植）
+    ImFontConfig config;
+    config.FontDataOwnedByAtlas = false;
+    config.OversampleH = 1;
+    static const ImWchar icons_ranges[] = { 0xf000, 0xf3ff, 0 };
+    ImFontConfig icons_config;
+    icons_config.MergeMode = true;
+    icons_config.PixelSnapH = true;
+    icons_config.OversampleH = 2.5;
+    icons_config.OversampleV = 2.5;
+    // 主字体 28px + FontAwesome 28px 合并
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 28.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontFromMemoryCompressedTTF(font_awesome_data, font_awesome_size, 28.0f, &icons_config, icons_ranges);
+    // Large 30px / Superlarge 40px
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 30.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, zt_ttf_len, 40.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+    icons_config.PixelSnapH = true;
+    io.Fonts->AddFontDefault(&config);
 
-    // 样式调整
-    ImGui::GetStyle().ScaleAllSizes(3.0f); // 放大样式比例
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 5.3f;
-    style.FrameRounding = 2.3f;
-    style.ScrollbarRounding = 0;
-
-    // 初始化 Aura UI（应用 Mac 风格毛玻璃样式）
+    // 初始化 Aura UI（加载 LOGO 纹理 + 应用 Mac 风格毛玻璃样式）
     aura_ui::init();
 
     g_Initialized = true;

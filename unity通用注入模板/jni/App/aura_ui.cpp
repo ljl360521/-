@@ -1,104 +1,127 @@
 //
 // Aura UI 模块实现
-// 移植自 AuraNexus 项目的 Mac 风格毛玻璃 UI
-// 完美还原原项目的视觉风格、动画、布局
+// 完美移植自 AuraNexus 项目
+// 严格按原版 MainDefinition.h + imgui_widgets.cpp + MainUI.h 逐行移植
+// 所有配色、动画参数、窗口结构、widget 实现与原版完全一致
 //
 
-#define IMGUI_DEFINE_MATH_OPERATORS
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #include "aura_ui.hpp"
+#include "LOGO.h"
 
-#include <cmath>
+#include <GLES3/gl3.h>
 #include <cstdio>
+#include <cstring>
 #include <string>
-#include <vector>
-#include <unordered_map>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/sysinfo.h>
 
 namespace aura_ui {
 
 // ============================================================================
-// Mac 风格配色常量（原项目核心配色）
+// 全局变量（原版 main.cpp + draw.cpp）
 // ============================================================================
-namespace mac {
-    constexpr ImU32 BLUE        = IM_COL32(0, 122, 255, 255);   // Mac 蓝色
-    constexpr ImU32 BLUE_LIGHT  = IM_COL32(22, 119, 255, 255);
-    constexpr ImU32 GREEN       = IM_COL32(52, 199, 89, 255);   // Mac 绿色
-    constexpr ImU32 ORANGE      = IM_COL32(255, 159, 10, 255);  // Mac 橙色
-    constexpr ImU32 PURPLE      = IM_COL32(191, 90, 242, 255);  // Mac 紫色
-    constexpr ImU32 RED         = IM_COL32(255, 69, 58, 255);   // Mac 红色
+ImTextureID LOGO = 0;
+static GLuint g_logo_texture = 0;
 
-    constexpr ImU32 TEXT_LIGHT  = IM_COL32(235, 235, 240, 255); // 主文字
-    constexpr ImU32 TEXT_DIM    = IM_COL32(200, 200, 205, 255); // 次文字
-    constexpr ImU32 TEXT_GRAY   = IM_COL32(128, 128, 128, 255); // 灰色副文本
-    constexpr ImU32 TEXT_DARK   = IM_COL32(89, 89, 89, 255);    // 未选中文字
-
-    // 毛玻璃背景层次
-    constexpr ImU32 GLASS_BG    = IM_COL32(255, 255, 255, 128); // 半透明白色 (1,1,1,0.5)
-    constexpr ImU32 CARD_BG     = IM_COL32(20, 20, 24, 160);    // 深色卡片
-    constexpr ImU32 CARD_HOVER  = IM_COL32(44, 44, 48, 200);
-    constexpr ImU32 CARD_ACTIVE = IM_COL32(28, 28, 32, 220);
-    constexpr ImU32 CARD_SEL    = IM_COL32(0, 122, 255, 30);    // 选中态
-
-    constexpr float ROUND_LARGE = 40.0f;
-    constexpr float ROUND_MED   = 10.0f;
-}
+// 原版 main.cpp 全局变量
+static float menu_expand = 0.0f;
+static bool last_menu_state = false;
+static bool MainAuraOne = true;
+float FPSControlSize = 60.0f;
+int background_mode = 0;
+float ImGuiDrawESP = 0.7f;
+float ImGuiDrawESP2 = 0.7f;
+int Prevent = 0;
 
 // ============================================================================
-// 初始化 - 应用 Mac 风格样式
+// 游戏功能 stub（原版 MainDefinition.h 第889行起 + gjc.h）
+// 本项目无对应游戏功能，提供空实现以保持 UI 与原版一致
+// ============================================================================
+std::atomic<bool> lb_gjc_injected{false};
+std::string lb_gjc_status = "\xe6\x9c\xaa\xe6\xb3\xa8\xe5\x85\xa5"; // 未注入
+std::atomic<bool> lb_game_running{false};
+std::atomic<bool> lb_game_ready{false};
+static unsigned long lb_base_libUE4 = 0;
+
+std::atomic<bool> lb_feature_luna{false};
+std::atomic<bool> lb_feature_head{false};
+std::atomic<bool> lb_feature_body{false};
+std::atomic<bool> lb_feature_bullet{false};
+std::atomic<bool> lb_feature_norecoil{false};
+std::atomic<bool> lb_feature_thirdperson{false};
+std::atomic<bool> lb_feature_neitou{false};
+
+std::atomic<float> lb_head_val{90.0f};
+std::atomic<float> lb_body_val{80.0f};
+
+std::atomic<bool> lb_freeze_running{false};
+std::atomic<float> lb_abdominal_target{99.0f};
+std::thread lb_freeze_thread;
+
+uintptr_t lb_bullet_addr = 0;
+int lb_bullet_val = 505873377;
+std::atomic<bool> lb_bullet_frozen{false};
+
+uintptr_t lb_norecoil_addr = 0;
+int lb_norecoil_val = -1119858432;
+std::atomic<bool> lb_norecoil_frozen{false};
+
+uintptr_t lb_thirdperson_addr = 0;
+int lb_thirdperson_val = 1384120352;
+std::atomic<bool> lb_thirdperson_frozen{false};
+std::thread lb_thirdperson_thread;
+
+uintptr_t lb_neitou_world_ptr = 0;
+std::atomic<bool> lb_neitou_running{false};
+std::thread lb_neitou_thread;
+std::string lb_neitou_status = "\xe6\x9c\xaa\xe5\x90\xaf\xe5\x8a\xa8"; // 未启动
+
+void lb_init_game() {}
+void lb_clean_exit() {}
+void lb_writeDword(uintptr_t, int) {}
+void lb_freeze_thread_func() {}
+void lb_thirdperson_thread_func() {}
+void lb_neitou_thread_func() {}
+
+// ============================================================================
+// init - 加载 LOGO 纹理（原版 LoadImages）
 // ============================================================================
 void init() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    // Mac 风格圆角
-    style.WindowRounding    = mac::ROUND_LARGE;
-    style.ChildRounding     = mac::ROUND_LARGE;
-    style.FrameRounding     = mac::ROUND_MED;
-    style.GrabRounding      = mac::ROUND_MED;
-    style.PopupRounding     = mac::ROUND_MED;
-    style.ScrollbarRounding = mac::ROUND_MED;
-    // 无边框
-    style.WindowBorderSize  = 0;
-    style.ChildBorderSize   = 0;
-    style.FrameBorderSize   = 0;
-    // 间距
-    style.WindowPadding     = ImVec2(10, 10);
-    style.FramePadding      = ImVec2(10, 8);
-    style.ItemSpacing       = ImVec2(8, 8);
-
-    // 深色毛玻璃配色
-    ImVec4* c = style.Colors;
-    c[ImGuiCol_WindowBg]        = ImVec4(0.04f, 0.04f, 0.06f, 0.85f);
-    c[ImGuiCol_ChildBg]         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_PopupBg]         = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
-    c[ImGuiCol_Border]          = ImVec4(1.0f, 1.0f, 1.0f, 0.0f);
-    c[ImGuiCol_Text]            = ImVec4(0.92f, 0.92f, 0.94f, 1.0f);
-    c[ImGuiCol_TextDisabled]    = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-    c[ImGuiCol_FrameBg]         = ImVec4(0.10f, 0.10f, 0.12f, 0.8f);
-    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.15f, 0.15f, 0.18f, 0.9f);
-    c[ImGuiCol_FrameBgActive]   = ImVec4(0.20f, 0.20f, 0.24f, 1.0f);
-    c[ImGuiCol_Button]          = ImVec4(0.12f, 0.12f, 0.15f, 0.8f);
-    c[ImGuiCol_ButtonHovered]   = ImVec4(0.0f, 0.48f, 1.0f, 0.8f);
-    c[ImGuiCol_ButtonActive]    = ImVec4(0.0f, 0.40f, 0.85f, 1.0f);
-    c[ImGuiCol_Header]          = ImVec4(0.0f, 0.48f, 1.0f, 0.4f);
-    c[ImGuiCol_HeaderHovered]   = ImVec4(0.0f, 0.48f, 1.0f, 0.6f);
-    c[ImGuiCol_HeaderActive]    = ImVec4(0.0f, 0.48f, 1.0f, 0.8f);
-    c[ImGuiCol_CheckMark]       = ImVec4(0.0f, 0.48f, 1.0f, 1.0f);
-    c[ImGuiCol_SliderGrab]      = ImVec4(0.0f, 0.48f, 1.0f, 1.0f);
-    c[ImGuiCol_SliderGrabActive]= ImVec4(0.0f, 0.60f, 1.0f, 1.0f);
-    c[ImGuiCol_Separator]       = ImVec4(1.0f, 1.0f, 1.0f, 0.1f);
-    c[ImGuiCol_Tab]             = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_TabHovered]      = ImVec4(0.0f, 0.48f, 1.0f, 0.3f);
-    c[ImGuiCol_TabActive]       = ImVec4(0.0f, 0.48f, 1.0f, 0.5f);
-    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_ScrollbarGrab]   = ImVec4(1.0f, 1.0f, 1.0f, 0.2f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.0f, 1.0f, 1.0f, 0.3f);
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.0f, 0.48f, 1.0f, 0.6f);
+    if (g_logo_texture) return;
+    int w, h, channels;
+    unsigned char* data = stbi_load_from_memory(Logo, sizeof(Logo), &w, &h, &channels, 4);
+    if (!data) return;
+    glGenTextures(1, &g_logo_texture);
+    glBindTexture(GL_TEXTURE_2D, g_logo_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    stbi_image_free(data);
+    LOGO = (ImTextureID)(intptr_t)g_logo_texture;
 }
 
 // ============================================================================
-// DrawAuraSectionTitle - 带左侧蓝色竖条的标题
+// UpdateBlurWindow - 空实现
+// 原版用 Vulkan + SurfaceControl 背景模糊，OpenGL 后端无法实现
+// ============================================================================
+void UpdateBlurWindow(const ImVec2& pos, const ImVec2& size, float radius, bool enabled, int blurStrength) {
+    (void)pos; (void)size; (void)radius; (void)enabled; (void)blurStrength;
+}
+
+// ============================================================================
+// DrawAuraSectionTitle（原版 MainDefinition.h 第17-41行）
 // ============================================================================
 void DrawAuraSectionTitle(const char* title) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
+    if (window->SkipItems)
+        return;
 
     ImGuiContext& g = *GImGui;
     const ImGuiStyle& style = g.Style;
@@ -112,423 +135,178 @@ void DrawAuraSectionTitle(const char* title) {
     // 左侧竖条 - Mac 蓝色
     ImVec2 line_p1(cursor_pos.x, cursor_pos.y);
     ImVec2 line_p2(cursor_pos.x + line_width, cursor_pos.y + title_height);
-    window->DrawList->AddRectFilled(line_p1, line_p2, mac::BLUE, 2.0f);
+    window->DrawList->AddRectFilled(line_p1, line_p2, IM_COL32(0, 122, 255, 255), 2.0f);
 
     // 标题文字 - Mac 风格白色
     ImVec2 text_pos(cursor_pos.x + line_width + spacing, cursor_pos.y);
-    window->DrawList->AddText(text_pos, mac::TEXT_LIGHT, title);
+    window->DrawList->AddText(text_pos, IM_COL32(235, 235, 240, 255), title);
 
     ImGui::ItemSize(ImVec2(0, title_height + style.ItemSpacing.y), 0.0f);
 }
 
 // ============================================================================
-// BeginGlassCard / EndGlassCard - 玻璃卡片容器
+// _FreqControl 类（原版 MainDefinition.h 第43-161行）
+// CPU/GPU/RAM 使用率读取
 // ============================================================================
-bool BeginGlassCard(const char* label, const ImVec2& size, bool border, ImGuiWindowFlags flags) {
-    ImGuiStyle& style = ImGui::GetStyle();
-    // 保存当前样式
-    ImVec4 saved_child_bg    = style.Colors[ImGuiCol_ChildBg];
-    ImVec4 saved_border      = style.Colors[ImGuiCol_Border];
-    float  saved_rounding    = style.ChildRounding;
-    float  saved_border_size = style.ChildBorderSize;
-    ImVec2 saved_padding     = style.WindowPadding;
+class _FreqControl {
+private:
+    static std::chrono::steady_clock::time_point cpuLastTime;
+    static float cpuCachedValue;
+    static unsigned long long cpuLastTotalUser;
+    static unsigned long long cpuLastTotalUserLow;
+    static unsigned long long cpuLastTotalSys;
+    static unsigned long long cpuLastTotalIdle;
+    static std::chrono::steady_clock::time_point memLastTime;
+    static float memCachedPercent;
+    static std::chrono::steady_clock::time_point gpuLastTime;
+    static int gpuCachedValue;
+    static constexpr int CPU_MIN_INTERVAL = 1000;
+    static constexpr int MEM_MIN_INTERVAL = 2000;
+    static constexpr int GPU_MIN_INTERVAL = 1000;
+public:
+    static float GetCPUUsage();
+    static float GetMemPercent();
+    static int GetGPUUsage();
+private:
+    static float _ReadCPU();
+    static float _ReadMemPercent();
+    static int _ReadGPU();
+};
+std::chrono::steady_clock::time_point _FreqControl::cpuLastTime =
+    std::chrono::steady_clock::now() - std::chrono::milliseconds(2000);
+float _FreqControl::cpuCachedValue = 0.0f;
+unsigned long long _FreqControl::cpuLastTotalUser = 0;
+unsigned long long _FreqControl::cpuLastTotalUserLow = 0;
+unsigned long long _FreqControl::cpuLastTotalSys = 0;
+unsigned long long _FreqControl::cpuLastTotalIdle = 0;
+std::chrono::steady_clock::time_point _FreqControl::memLastTime =
+    std::chrono::steady_clock::now() - std::chrono::milliseconds(3000);
+float _FreqControl::memCachedPercent = 0.0f;
+std::chrono::steady_clock::time_point _FreqControl::gpuLastTime =
+    std::chrono::steady_clock::now() - std::chrono::milliseconds(2000);
+int _FreqControl::gpuCachedValue = 0;
 
-    // 应用玻璃卡片样式：半透明白色 + 圆角 40
-    style.Colors[ImGuiCol_ChildBg]   = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
-    style.Colors[ImGuiCol_Border]    = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
-    style.ChildRounding              = mac::ROUND_LARGE;
-    style.ChildBorderSize            = 1.5f;
-    style.WindowPadding              = ImVec2(16, 16);
-
-    bool ret = ImGui::BeginChild(label, size, border, flags);
-
-    // 恢复样式
-    style.Colors[ImGuiCol_ChildBg]   = saved_child_bg;
-    style.Colors[ImGuiCol_Border]    = saved_border;
-    style.ChildRounding              = saved_rounding;
-    style.ChildBorderSize            = saved_border_size;
-    style.WindowPadding              = saved_padding;
-    return ret;
-}
-
-void EndGlassCard() {
-    ImGui::EndChild();
-}
-
-// ============================================================================
-// ButtonWithIcon - 带图标和副标题的按钮
-// 原项目用 LOGO 纹理，这里用文字图标代替
-// ============================================================================
-bool ButtonWithIcon(const char* label, const char* subtitle, const ImVec2& size_arg) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return false;
-
-    ImGuiContext& g = *GImGui;
-    const ImGuiStyle& style = g.Style;
-    const ImGuiID id = window->GetID(label);
-    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
-    const ImVec2 subtitle_size = ImGui::CalcTextSize(subtitle, NULL, true);
-
-    ImVec2 pos = window->DC.CursorPos;
-
-    // 计算所需尺寸（图标用文字圆圈代替，70x70）
-    float icon_size = 60.0f;
-    float left_margin = 12.0f;
-    float icon_text_spacing = 14.0f;
-    float text_width = ImMax(label_size.x, subtitle_size.x);
-    float text_height = label_size.y + subtitle_size.y + 4.0f;
-
-    ImVec2 size = ImGui::CalcItemSize(size_arg,
-        left_margin + icon_size + icon_text_spacing + text_width + style.FramePadding.x * 2.0f,
-        ImMax(icon_size, text_height) + style.FramePadding.y * 2.0f);
-
-    const ImRect bb(pos, pos + size);
-    ImGui::ItemSize(size, style.FramePadding.y);
-    if (!ImGui::ItemAdd(bb, id)) return false;
-
-    bool hovered, held;
-    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, 0);
-
-    ImDrawList* draw_list = window->DrawList;
-
-    // 动画：hover 上浮 + 缩放
-    float* anim_y     = ImGui::GetStateStorage()->GetFloatRef(id + 0x1000, 0.0f);
-    float* anim_scale = ImGui::GetStateStorage()->GetFloatRef(id + 0x2000, 1.0f);
-    const float dt = g.IO.DeltaTime;
-    const float speed = 8.0f;
-    float target_y = (hovered && !held) ? -2.0f : 0.0f;
-    *anim_y = ImLerp(*anim_y, target_y, dt * speed);
-    float target_scale = (held && hovered) ? 0.98f : 1.0f;
-    *anim_scale = ImLerp(*anim_scale, target_scale, dt * speed);
-
-    ImVec2 center = bb.GetCenter();
-    ImVec2 anim_size = ImVec2(size.x * *anim_scale, size.y * *anim_scale);
-    ImRect anim_bb(
-        ImVec2(center.x - anim_size.x * 0.5f, center.y - anim_size.y * 0.5f + *anim_y),
-        ImVec2(center.x + anim_size.x * 0.5f, center.y + anim_size.y * 0.5f + *anim_y)
-    );
-
-    // Mac 风格背景
-    ImU32 col_bg, col_border;
-    if (held && hovered) {
-        col_bg = mac::CARD_ACTIVE;
-        col_border = IM_COL32(80, 80, 90, 200);
-    } else if (hovered) {
-        col_bg = mac::CARD_HOVER;
-        col_border = IM_COL32(60, 60, 66, 200);
-    } else {
-        col_bg = mac::CARD_BG;
-        col_border = IM_COL32(50, 50, 55, 120);
-    }
-    draw_list->AddRectFilled(anim_bb.Min, anim_bb.Max, col_bg, mac::ROUND_MED);
-    draw_list->AddRect(anim_bb.Min, anim_bb.Max, col_border, mac::ROUND_MED, 0, 1.0f);
-
-    // 图标区域（用蓝色圆圈 + 首字母代替 LOGO）
-    float icon_x = anim_bb.Min.x + left_margin;
-    float icon_y = anim_bb.Min.y + (anim_size.y - icon_size) * 0.5f;
-    ImVec2 icon_center(icon_x + icon_size * 0.5f, icon_y + icon_size * 0.5f);
-    float icon_r = icon_size * 0.5f;
-
-    // 蓝色渐变圆
-    ImU32 icon_bg = hovered ? IM_COL32(0, 140, 255, 255) : mac::BLUE;
-    draw_list->AddCircleFilled(icon_center, icon_r, icon_bg, 32);
-    draw_list->AddCircleFilled(icon_center, icon_r * 0.85f, IM_COL32(0, 100, 220, 200), 32);
-
-    // 首字母（取 label 第一个字符）
-    char first_char[8] = {0};
-    if (label && label[0]) {
-        // 处理 UTF-8 首字符
-        int len = 0;
-        if ((unsigned char)label[0] < 0x80) len = 1;
-        else if (((unsigned char)label[0] & 0xE0) == 0xC0) len = 2;
-        else if (((unsigned char)label[0] & 0xF0) == 0xE0) len = 3;
-        else len = 1;
-        memcpy(first_char, label, len);
-        first_char[len] = 0;
-    }
-    ImVec2 char_size = ImGui::CalcTextSize(first_char);
-    draw_list->AddText(ImVec2(icon_center.x - char_size.x * 0.5f,
-                              icon_center.y - char_size.y * 0.5f),
-                       IM_COL32(255, 255, 255, 255), first_char);
-
-    // 文本位置
-    float text_start_x = icon_x + icon_size + icon_text_spacing;
-    float total_text_height = label_size.y + subtitle_size.y + 4.0f;
-    float text_start_y = anim_bb.Min.y + (anim_size.y - total_text_height) * 0.5f;
-
-    // 主文本
-    ImU32 label_color = hovered ? mac::TEXT_LIGHT : mac::TEXT_LIGHT;
-    draw_list->AddText(ImVec2(text_start_x, text_start_y), label_color, label);
-
-    // 副文本（灰色）
-    ImU32 subtitle_color = hovered ? IM_COL32(160, 160, 160, 255) : mac::TEXT_GRAY;
-    draw_list->AddText(ImVec2(text_start_x, text_start_y + label_size.y + 4.0f),
-                       subtitle_color, subtitle);
-
-    return pressed;
-}
-
-// ============================================================================
-// ButtonTab - 标签按钮（带滑动选中动画）
-// 完美还原原项目的滑动选中背景动画
-// ============================================================================
-// 全局状态（原项目用 static 变量，这里用全局保持一致）
-static ImGuiID g_tab_current_selected = 0;
-static ImVec2  g_tab_target_pos = ImVec2(0, 0);
-static ImVec2  g_tab_current_pos = ImVec2(0, 0);
-static ImVec2  g_tab_target_size = ImVec2(0, 0);
-static ImVec2  g_tab_current_size = ImVec2(0, 0);
-static float   g_tab_anim_alpha = 0.4f;
-static bool    g_tab_first_frame = true;
-
-bool ButtonTab(const char* label, const ImVec2& size_arg, int tab_id, int* current_tab) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return false;
-
-    ImGuiContext& g = *GImGui;
-    const ImGuiStyle& style = g.Style;
-    const ImGuiID id = window->GetID(label);
-    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
-
-    ImVec2 pos = window->DC.CursorPos;
-    ImVec2 size = ImGui::CalcItemSize(size_arg,
-        label_size.x + style.FramePadding.x * 2.0f,
-        label_size.y + style.FramePadding.y * 2.0f);
-
-    const ImRect bb(pos, pos + size);
-    ImGui::ItemSize(size, style.FramePadding.y);
-    if (!ImGui::ItemAdd(bb, id)) return false;
-
-    bool hovered, held;
-    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, 0);
-
-    // 首次调用时默认选中第一个 tab
-    if (g_tab_first_frame) {
-        g_tab_target_pos = pos;
-        g_tab_current_pos = g_tab_target_pos;
-        g_tab_target_size = size;
-        g_tab_current_size = g_tab_target_size;
-        g_tab_first_frame = false;
-        g_tab_anim_alpha = 1.0f;
-        g_tab_current_selected = id;
-    }
-
-    bool selected = (g_tab_current_selected == id);
-    if (selected) {
-        g_tab_target_pos = pos;
-        g_tab_target_size = size;
-    }
-
-    // 滑动动画（0.08 插值速度，与原项目一致）
-    float move_t = 0.08f;
-    g_tab_current_pos.x += (g_tab_target_pos.x - g_tab_current_pos.x) * move_t;
-    g_tab_current_pos.y += (g_tab_target_pos.y - g_tab_current_pos.y) * move_t;
-    g_tab_current_size.x += (g_tab_target_size.x - g_tab_current_size.x) * move_t;
-    g_tab_current_size.y += (g_tab_target_size.y - g_tab_current_size.y) * move_t;
-
-    // 透明度动画
-    float target_alpha = selected ? 1.0f : 0.5f;
-    if (g_tab_anim_alpha < target_alpha)
-        g_tab_anim_alpha = ImMin(g_tab_anim_alpha + g.IO.DeltaTime * 4.0f, target_alpha);
-    else if (g_tab_anim_alpha > target_alpha)
-        g_tab_anim_alpha = ImMax(g_tab_anim_alpha - g.IO.DeltaTime * 4.0f, target_alpha);
-
-    // 绘制 Mac 蓝色毛玻璃选中背景
-    float radius = g_tab_current_size.y * 0.5f;
-    ImColor bg_color = ImColor(0.0f, 122.0f / 255.0f, 1.0f,
-                               selected ? 0.75f : g_tab_anim_alpha * 0.5f);
-    window->DrawList->AddRectFilled(g_tab_current_pos,
-                                    g_tab_current_pos + g_tab_current_size,
-                                    (ImU32)bg_color, radius,
-                                    ImDrawFlags_RoundCornersRight);
-
-    // 文本（水平垂直居中）
-    ImVec4 text_color = selected
-        ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
-        : ImVec4(89.0f / 255.0f, 89.0f / 255.0f, 89.0f / 255.0f, 1.0f);
-    float text_x = pos.x + (size.x - label_size.x) * 0.5f;
-    float text_y = pos.y + (size.y - label_size.y) * 0.5f;
-
-    ImGui::PushStyleColor(ImGuiCol_Text, text_color);
-    ImGui::RenderText(ImVec2(text_x, text_y), label);
-    ImGui::PopStyleColor();
-
-    if (pressed) {
-        g_tab_current_selected = id;
-        g_tab_target_pos = pos;
-        g_tab_target_size = size;
-        g_tab_anim_alpha = 1.0f;
-        if (current_tab) *current_tab = tab_id;
-    }
-
-    return pressed;
-}
-
-// ============================================================================
-// HorizontalToggleBar - 水平切换栏（带滑动动画）
-// ============================================================================
-bool HorizontalToggleBar(const char* label, int* current_item,
-                         const char* const items[], int items_count) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return false;
-
-    ImGuiContext& g = *GImGui;
-    const ImGuiStyle& style = g.Style;
-
-    ImGui::PushID(label);
-    const ImGuiID id = window->GetID(label);
-
-    // 尺寸参数（与原项目一致）
-    const float bar_height = 60.0f;
-    const float toggle_height = 40.0f;
-    const float rounding = toggle_height * 0.5f;
-    const float left_margin = 10.0f;
-    const float right_margin = 10.0f;
-    const float toggle_area_width = 300.0f;
-
-    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
-
-    ImVec2 size_arg(-1.0f, bar_height);
-    ImVec2 actual_size = ImGui::CalcItemSize(size_arg,
-        label_size.x + toggle_area_width + left_margin + right_margin, bar_height);
-
-    const float total_width = actual_size.x;
-    const float total_height = actual_size.y;
-
-    const ImVec2 pos = window->DC.CursorPos;
-    const ImRect total_bb(pos, pos + ImVec2(total_width, total_height));
-
-    ImGui::ItemSize(total_bb, style.FramePadding.y);
-    if (!ImGui::ItemAdd(total_bb, id)) {
-        ImGui::PopID();
-        return false;
-    }
-
-    // 文本区域（左侧）
-    ImRect text_bb(
-        ImVec2(pos.x + left_margin, pos.y),
-        ImVec2(pos.x + left_margin + label_size.x, pos.y + total_height));
-
-    // 切换条区域（右侧）
-    ImRect toggle_bb(
-        ImVec2(pos.x + total_width - right_margin - toggle_area_width, pos.y + 10.0f),
-        ImVec2(pos.x + total_width - right_margin, pos.y + total_height - 10.0f));
-
-    const float toggle_total_width = toggle_bb.Max.x - toggle_bb.Min.x;
-    const float item_width = toggle_total_width / items_count;
-
-    // 交互
-    bool hovered, held;
-    bool pressed = ImGui::ButtonBehavior(total_bb, id, &hovered, &held);
-
-    bool value_changed = false;
-    if (pressed && hovered) {
-        ImVec2 local_mouse_pos = ImGui::GetMousePos();
-        float toggle_left = toggle_bb.Min.x;
-        for (int i = 0; i < items_count; i++) {
-            ImRect item_bb(
-                ImVec2(toggle_left + item_width * i, toggle_bb.Min.y),
-                ImVec2(toggle_left + item_width * (i + 1), toggle_bb.Max.y));
-            if (item_bb.Contains(local_mouse_pos)) {
-                if (*current_item != i) {
-                    *current_item = i;
-                    value_changed = true;
-                    ImGui::MarkItemEdited(id);
-                }
-                break;
-            }
+float _FreqControl::_ReadCPU() {
+    unsigned long long user, nice, sys, idle;
+    FILE* f = fopen("/proc/stat", "r");
+    if (!f) return cpuCachedValue;
+    if (fscanf(f, "cpu %llu %llu %llu %llu", &user, &nice, &sys, &idle) != EOF) {
+        if (cpuLastTotalUser != 0) {
+            unsigned long long d_user = user - cpuLastTotalUser;
+            unsigned long long d_nice = nice - cpuLastTotalUserLow;
+            unsigned long long d_sys  = sys - cpuLastTotalSys;
+            unsigned long long d_idle = idle - cpuLastTotalIdle;
+            unsigned long long total = d_user + d_nice + d_sys;
+            unsigned long long all   = total + d_idle;
+            if (all > 0)
+                cpuCachedValue = (float)total / all * 100.0f;
         }
+        cpuLastTotalUser= user;
+        cpuLastTotalUserLow = nice;
+        cpuLastTotalSys = sys;
+        cpuLastTotalIdle= idle;
     }
-
-    // 动画状态
-    ImGuiStorage* storage = window->DC.StateStorage;
-    float* animation_pos = storage->GetFloatRef(id + items_count, 0.0f);
-    const float target_pos = item_width * (*current_item);
-    const float animation_speed = 0.06f;
-
-    if (*animation_pos != target_pos) {
-        float delta = target_pos - *animation_pos;
-        *animation_pos += delta * animation_speed;
-        if (fabs(*animation_pos - target_pos) < 0.5f)
-            *animation_pos = target_pos;
+    fclose(f);
+    return cpuCachedValue;
+}
+float _FreqControl::GetCPUUsage() {
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - cpuLastTime).count();
+    if (ms >= CPU_MIN_INTERVAL) {
+        cpuLastTime = now;
+        cpuCachedValue = _ReadCPU();
     }
-
-    // hover/press 缩放动画
-    float* anim_y = storage->GetFloatRef(id + 0x1000, 0.0f);
-    float* anim_scale = storage->GetFloatRef(id + 0x2000, 1.0f);
-    const float dt = g.IO.DeltaTime;
-    const float speed = 8.0f;
-    float target_y = (hovered && !held) ? -2.0f : 0.0f;
-    *anim_y = ImLerp(*anim_y, target_y, dt * speed);
-    float target_scale = (held && hovered) ? 0.98f : 1.0f;
-    *anim_scale = ImLerp(*anim_scale, target_scale, dt * speed);
-
-    ImVec2 center = total_bb.GetCenter();
-    ImVec2 animated_size = total_bb.GetSize() * *anim_scale;
-    ImRect animated_bb(
-        ImVec2(center.x - animated_size.x * 0.5f, center.y - animated_size.y * 0.5f + *anim_y),
-        ImVec2(center.x + animated_size.x * 0.5f, center.y + animated_size.y * 0.5f + *anim_y));
-
-    // 配色
-    ImU32 col_text;
-    bool* is_active = storage->GetBoolRef(id, false);
-    if (pressed) *is_active = !(*is_active);
-    if (held && hovered)       col_text = IM_COL32(255, 255, 255, 255);
-    else if (*is_active)       col_text = IM_COL32(255, 255, 255, 255);
-    else if (hovered)          col_text = mac::BLUE_LIGHT;
-    else                       col_text = IM_COL32(102, 102, 102, 255);
-
-    ImU32 col_toggle_border = IM_COL32(200, 200, 200, 255);
-    ImU32 col_toggle_active = mac::BLUE_LIGHT;
-
-    // 标签文本
-    ImVec2 animated_text_pos(
-        animated_bb.Min.x + left_margin,
-        animated_bb.Min.y + (animated_bb.GetHeight() - label_size.y) * 0.5f);
-    window->DrawList->AddText(animated_text_pos, col_text, label);
-
-    // 切换条边框
-    window->DrawList->AddRect(
-        ImVec2(animated_bb.Max.x - right_margin - toggle_area_width, animated_bb.Min.y + 10.0f),
-        ImVec2(animated_bb.Max.x - right_margin, animated_bb.Max.y - 10.0f),
-        col_toggle_border, rounding, 0, 1.5f);
-
-    // 活跃滑块
-    float anim_toggle_left = animated_bb.Max.x - right_margin - toggle_area_width;
-    float anim_item_width = toggle_area_width / items_count;
-    ImRect slider_bb(
-        ImVec2(anim_toggle_left + *animation_pos, animated_bb.Min.y + 10.0f),
-        ImVec2(anim_toggle_left + *animation_pos + anim_item_width, animated_bb.Max.y - 10.0f));
-    window->DrawList->AddRectFilled(slider_bb.Min, slider_bb.Max, col_toggle_active, rounding);
-
-    // 选项文本
-    for (int i = 0; i < items_count; i++) {
-        const char* item_text = items[i];
-        ImVec2 text_size = ImGui::CalcTextSize(item_text, NULL, true);
-        float item_center_x = anim_toggle_left + anim_item_width * i + anim_item_width * 0.5f;
-        ImVec2 item_text_pos(
-            item_center_x - text_size.x * 0.5f,
-            animated_bb.Min.y + 10.0f + (toggle_height - text_size.y) * 0.5f);
-        bool is_over_slider = (item_center_x >= slider_bb.Min.x && item_center_x <= slider_bb.Max.x);
-        ImU32 item_color = is_over_slider ? IM_COL32(255, 255, 255, 255) : IM_COL32(102, 102, 102, 255);
-        window->DrawList->AddText(item_text_pos, item_color, item_text);
+    return cpuCachedValue;
+}
+float _FreqControl::_ReadMemPercent() {
+    long total = 0, avail = 0;
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f) return memCachedPercent;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), f)) {
+        if (!total) sscanf(buf, "MemTotal: %ld kB", &total);
+        if (sscanf(buf, "MemAvailable: %ld kB", &avail)) break;
     }
-
-    ImGui::PopID();
-    return value_changed;
+    fclose(f);
+    if (total <= 0) return 0.0f;
+    return 100.0f - (float)avail / total * 100.0f;
+}
+float _FreqControl::GetMemPercent() {
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - memLastTime).count();
+    if (ms >= MEM_MIN_INTERVAL) {
+        memLastTime = now;
+        memCachedPercent = _ReadMemPercent();
+    }
+    return memCachedPercent;
+}
+int _FreqControl::_ReadGPU() {
+    const char* paths[] = {
+        "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+        "/sys/devices/platform/kgsl-3d0/kgsl/kgsl-3d0/gpu_busy_percentage",
+        nullptr
+    };
+    for (const char* p : paths) {
+        if (!p) continue;
+        FILE* f = fopen(p, "r");
+        if (!f) continue;
+        int val = 0;
+        if (fscanf(f, "%d", &val) == 1) {
+            fclose(f);
+            return val;
+        }
+        fclose(f);
+    }
+    return gpuCachedValue;
+}
+int _FreqControl::GetGPUUsage() {
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - gpuLastTime).count();
+    if (ms >= GPU_MIN_INTERVAL) {
+        gpuLastTime = now;
+        gpuCachedValue = _ReadGPU();
+    }
+    return gpuCachedValue;
 }
 
 // ============================================================================
-// DrawCircleGauge - 圆环进度
+// FPSCounter 类（原版 MainDefinition.h 第162-181行）
+// ============================================================================
+class FPSCounter {
+private:
+    static long long lastTick;
+    static int frames;
+    static int currentFPS;
+public:
+    static int GetFPS() {
+        long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        frames++;
+        if (now - lastTick >= 1000) {
+            currentFPS = frames;
+            frames = 0;
+            lastTick = now;
+        }
+        return currentFPS;
+    }
+};
+long long FPSCounter::lastTick = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+int FPSCounter::frames = 0;
+int FPSCounter::currentFPS = 0;
+
+int GetRealFPS() { return FPSCounter::GetFPS(); }
+int GetRealCPU() { return (int)_FreqControl::GetCPUUsage(); }
+int GetRealGPU() { return _FreqControl::GetGPUUsage(); }
+int GetRealRAMPercent()  { return (int)_FreqControl::GetMemPercent(); }
+
+// ============================================================================
+// DrawCircleGauge（原版 MainDefinition.h 第192-204行）
 // ============================================================================
 void DrawCircleGauge(ImVec2 center, float radius, float progress, ImU32 color, float thickness) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems) return;
     progress = ImClamp(progress, 0.0f, 1.0f);
-    // 背景圆环
     window->DrawList->PathArcTo(center, radius, 0.0f, IM_PI * 2.0f, 32);
     window->DrawList->PathStroke(IM_COL32(60, 60, 66, 100), 0, thickness);
-    // 进度圆环
     if (progress > 0.0f) {
         float angle_start = -IM_PI * 0.5f;
         float angle_end = angle_start + progress * IM_PI * 2.0f;
@@ -538,7 +316,7 @@ void DrawCircleGauge(ImVec2 center, float radius, float progress, ImU32 color, f
 }
 
 // ============================================================================
-// DrawSystemInfoCard - 系统信息卡片（FPS/CPU/GPU/RAM）
+// DrawSystemInfoCard（原版 MainDefinition.h 第206-369行）
 // ============================================================================
 bool DrawSystemInfoCard(SystemInfoType type, float value, const ImVec2& size) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -552,10 +330,26 @@ bool DrawSystemInfoCard(SystemInfoType type, float value, const ImVec2& size) {
     float max_value = 100.0f;
 
     switch (type) {
-        case SystemInfoType::FPS: title = "FPS"; unit = "fps"; max_value = 240.0f; break;
-        case SystemInfoType::CPU: title = "CPU"; unit = "%"; max_value = 100.0f; break;
-        case SystemInfoType::GPU: title = "GPU"; unit = "%"; max_value = 100.0f; break;
-        case SystemInfoType::RAM: title = "RAM"; unit = "%"; max_value = 100.0f; break;
+        case SystemInfoType::FPS:
+            title = "FPS";
+            unit = "fps";
+            max_value = 240.0f;
+            break;
+        case SystemInfoType::CPU:
+            title = "CPU";
+            unit = "%";
+            max_value = 100.0f;
+            break;
+        case SystemInfoType::GPU:
+            title = "GPU";
+            unit = "%";
+            max_value = 100.0f;
+            break;
+        case SystemInfoType::RAM:
+            title = "RAM";
+            unit = "%";
+            max_value = 100.0f;
+            break;
     }
 
     const ImGuiID id = window->GetID(title);
@@ -572,13 +366,15 @@ bool DrawSystemInfoCard(SystemInfoType type, float value, const ImVec2& size) {
     bool* is_active = ImGui::GetStateStorage()->GetBoolRef(id, false);
     if (pressed) *is_active = !(*is_active);
 
-    // 动画
+    // 动画效果
     float* anim_y = ImGui::GetStateStorage()->GetFloatRef(id + 0x1000, 0.0f);
     float* anim_scale = ImGui::GetStateStorage()->GetFloatRef(id + 0x2000, 1.0f);
     const float dt = g.IO.DeltaTime;
     const float speed = 8.0f;
+
     float target_y = (hovered && !held) ? -2.0f : 0.0f;
     *anim_y = ImLerp(*anim_y, target_y, dt * speed);
+
     float target_scale = (held && hovered) ? 0.98f : 1.0f;
     *anim_scale = ImLerp(*anim_scale, target_scale, dt * speed);
 
@@ -586,171 +382,567 @@ bool DrawSystemInfoCard(SystemInfoType type, float value, const ImVec2& size) {
     ImVec2 animated_size = ImVec2(size_final.x * *anim_scale, size_final.y * *anim_scale);
     ImRect animated_bb(
         ImVec2(center.x - animated_size.x * 0.5f, center.y - animated_size.y * 0.5f + *anim_y),
-        ImVec2(center.x + animated_size.x * 0.5f, center.y + animated_size.y * 0.5f + *anim_y));
+        ImVec2(center.x + animated_size.x * 0.5f, center.y + animated_size.y * 0.5f + *anim_y)
+    );
 
-    // Mac 风格配色
+    // Mac 黑色毛玻璃风格配色
     ImU32 col_bg, col_border, col_text, col_sub_text;
     if (held && hovered) {
-        col_bg = mac::CARD_ACTIVE; col_border = IM_COL32(80, 80, 90, 200);
-        col_text = IM_COL32(255, 255, 255, 255); col_sub_text = IM_COL32(255, 255, 255, 153);
+        col_bg = IM_COL32(28, 28, 32, 220);
+        col_border = IM_COL32(80, 80, 90, 200);
+        col_text = IM_COL32(255, 255, 255, 255);
+        col_sub_text = IM_COL32(255, 255, 255, 153);
     } else if (*is_active) {
-        col_bg = mac::CARD_SEL; col_border = mac::BLUE;
-        col_text = IM_COL32(255, 255, 255, 255); col_sub_text = IM_COL32(255, 255, 255, 180);
+        col_bg = IM_COL32(0, 122, 255, 30);
+        col_border = IM_COL32(0,122,255,255);
+        col_text = IM_COL32(255, 255, 255, 255);
+        col_sub_text = IM_COL32(255, 255, 255, 180);
     } else if (hovered) {
-        col_bg = mac::CARD_HOVER; col_border = IM_COL32(60, 60, 66, 200);
-        col_text = mac::TEXT_LIGHT; col_sub_text = IM_COL32(235, 235, 240, 153);
+        col_bg = IM_COL32(44, 44, 48, 200);
+        col_border = IM_COL32(60, 60, 66, 200);
+        col_text = IM_COL32(235, 235, 240, 255);
+        col_sub_text = IM_COL32(235, 235, 240, 153);
     } else {
-        col_bg = mac::CARD_BG; col_border = IM_COL32(50, 50, 55, 120);
-        col_text = mac::TEXT_DIM; col_sub_text = IM_COL32(200, 200, 205, 140);
+        col_bg = IM_COL32(20, 20, 24, 160);
+        col_border = IM_COL32(50, 50, 55, 120);
+        col_text = IM_COL32(200, 200, 205, 255);
+        col_sub_text = IM_COL32(200, 200, 205, 140);
     }
 
-    ImGui::RenderFrame(animated_bb.Min, animated_bb.Max, col_bg, true, mac::ROUND_MED);
-    window->DrawList->AddRect(animated_bb.Min, animated_bb.Max, col_border, mac::ROUND_MED, 0, 1.0f);
+    // 绘制背景和边框
+    ImGui::RenderFrame(animated_bb.Min, animated_bb.Max, col_bg, true, 10.0f);
+    window->DrawList->AddRect(animated_bb.Min, animated_bb.Max, col_border, 10.0f, 0, 1.0f);
+    ImGui::RenderNavCursor(animated_bb, id);
 
-    // 圆环
-    ImVec2 content_center = animated_bb.GetCenter();
+    // 计算圆环位置（居中）
+    ImVec2 content_center = ImVec2(
+        animated_bb.Min.x + (animated_bb.Max.x - animated_bb.Min.x) * 0.5f,
+        animated_bb.Min.y + (animated_bb.Max.y - animated_bb.Min.y) * 0.5f
+    );
+
     float gauge_radius = ImMin(size_final.x, size_final.y) * 0.30f;
     float progress = value / max_value;
 
+    // 圆环颜色
     ImU32 gauge_color;
     switch (type) {
-        case SystemInfoType::FPS: gauge_color = mac::GREEN; break;
-        case SystemInfoType::CPU: gauge_color = mac::ORANGE; break;
-        case SystemInfoType::GPU: gauge_color = mac::PURPLE; break;
-        case SystemInfoType::RAM: gauge_color = mac::BLUE; break;
+        case SystemInfoType::FPS:
+            gauge_color = IM_COL32(52, 199, 89, 255);   // Mac 绿色
+            break;
+        case SystemInfoType::CPU:
+            gauge_color = IM_COL32(255, 159, 10, 255);  // Mac 橙色
+            break;
+        case SystemInfoType::GPU:
+            gauge_color = IM_COL32(191, 90, 242, 255);  // Mac 紫色
+            break;
+        case SystemInfoType::RAM:
+            gauge_color = IM_COL32(0, 122, 255, 255);   // Mac 蓝色
+            break;
+        default:
+            gauge_color = IM_COL32(0, 122, 255, 255);
+            break;
     }
+
+    // 绘制圆环
     DrawCircleGauge(content_center, gauge_radius, progress, gauge_color, 5.0f);
 
-    // 数值
+    // 绘制数值（居中，大字）
     char value_buf[16];
-    snprintf(value_buf, sizeof(value_buf), "%.0f", value);
+    if (type == SystemInfoType::FPS) {
+        snprintf(value_buf, sizeof(value_buf), "%.0f", value);
+    } else {
+        snprintf(value_buf, sizeof(value_buf), "%.0f", value);
+    }
+
     ImVec2 value_size = ImGui::CalcTextSize(value_buf);
     ImVec2 title_size = ImGui::CalcTextSize(title);
+
+    // 计算文本整体高度（数值 + 标题）
     float text_spacing = 2.0f;
     float total_text_height = value_size.y + text_spacing + title_size.y;
-    ImVec2 value_pos(content_center.x - value_size.x * 0.5f,
-                     content_center.y - total_text_height * 0.5f);
-    ImVec2 title_pos(content_center.x - title_size.x * 0.5f,
-                     value_pos.y + value_size.y + text_spacing);
 
-    ImU32 value_color = (*is_active || hovered || held)
-        ? IM_COL32(255, 255, 255, 255) : mac::TEXT_LIGHT;
+    // 数值位置（居中偏上）
+    ImVec2 value_pos = ImVec2(
+        content_center.x - value_size.x * 0.5f,
+        content_center.y - total_text_height * 0.5f
+    );
+
+    // 标题位置（数值下方）
+    ImVec2 title_pos = ImVec2(
+        content_center.x - title_size.x * 0.5f,
+        value_pos.y + value_size.y + text_spacing
+    );
+
+    // 数值使用亮色
+    ImU32 value_color = (*is_active || hovered || held) ? IM_COL32(255, 255, 255, 255) : IM_COL32(235, 235, 240, 255);
     window->DrawList->AddText(value_pos, value_color, value_buf);
+
+    // 标题使用副文本颜色
     window->DrawList->AddText(title_pos, col_sub_text, title);
 
     return pressed;
 }
 
 // ============================================================================
-// 简易系统信息获取（模拟，因为没有真实的 /proc 读取需求）
+// BeginGlassCard / EndGlassCard（原版 MainDefinition.h 第857-887行）
 // ============================================================================
-static float get_fps() { return ImGui::GetIO().Framerate; }
-static float get_cpu() {
-    // 简单读取 /proc/stat
-    static float cached = 0.0f;
-    static double last_time = 0;
-    double now = ImGui::GetTime();
-    if (now - last_time < 1.0) return cached;
-    last_time = now;
-    FILE* f = fopen("/proc/stat", "r");
-    if (!f) return cached;
-    unsigned long long user, nice, sys, idle;
-    if (fscanf(f, "cpu %llu %llu %llu %llu", &user, &nice, &sys, &idle) == 4) {
-        static unsigned long long lu = 0, ln = 0, ls = 0, li = 0;
-        unsigned long long du = user - lu, dn = nice - ln, ds = sys - ls, di = idle - li;
-        unsigned long long total = du + dn + ds;
-        unsigned long long all = total + di;
-        if (all > 0) cached = (float)total / all * 100.0f;
-        lu = user; ln = nice; ls = sys; li = idle;
+bool BeginGlassCard(const char* label, const ImVec2& size, bool border, ImGuiWindowFlags flags) {
+    ImGuiStyle& style = ImGui::GetStyle();
+    static ImVec4 saved_child_bg;
+    static ImVec4 saved_border;
+    static float saved_rounding;
+    static float saved_border_size;
+    static ImVec2 saved_padding;
+    saved_child_bg = style.Colors[ImGuiCol_ChildBg];
+    saved_border = style.Colors[ImGuiCol_Border];
+    saved_rounding = style.ChildRounding;
+    saved_border_size = style.ChildBorderSize;
+    saved_padding = style.WindowPadding;
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(1.0f, 1.0f, 1.0f, 0.5f);
+    style.Colors[ImGuiCol_Border] = ImVec4(1.0f, 1.0f, 1.0f, 0.00f);
+    style.ChildRounding = 40.0f;
+    style.ChildBorderSize = 1.5f;
+    style.WindowPadding = ImVec2(10.0f, 10.0f);
+    bool ret = ImGui::BeginChild(label, size, border, flags);
+    if (ret) {
     }
-    fclose(f);
-    return cached;
+    style.Colors[ImGuiCol_ChildBg] = saved_child_bg;
+    style.Colors[ImGuiCol_Border] = saved_border;
+    style.ChildRounding = saved_rounding;
+    style.ChildBorderSize = saved_border_size;
+    style.WindowPadding = saved_padding;
+    return ret;
 }
-static float get_ram() {
-    static float cached = 0.0f;
-    static double last_time = 0;
-    double now = ImGui::GetTime();
-    if (now - last_time < 2.0) return cached;
-    last_time = now;
-    FILE* f = fopen("/proc/meminfo", "r");
-    if (!f) return cached;
-    long total = 0, avail = 0;
-    char buf[256];
-    while (fgets(buf, sizeof(buf), f)) {
-        if (!total) sscanf(buf, "MemTotal: %ld kB", &total);
-        if (sscanf(buf, "MemAvailable: %ld kB", &avail)) break;
-    }
-    fclose(f);
-    if (total <= 0) return 0.0f;
-    cached = 100.0f - (float)avail / total * 100.0f;
-    return cached;
-}
-static float get_gpu() {
-    // 简单读取 GPU busy
-    static float cached = 0.0f;
-    static double last_time = 0;
-    double now = ImGui::GetTime();
-    if (now - last_time < 1.0) return cached;
-    last_time = now;
-    const char* paths[] = {
-        "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
-        "/sys/devices/platform/kgsl-3d0/kgsl/kgsl-3d0/gpu_busy_percentage",
-        nullptr
-    };
-    for (const char* p : paths) {
-        if (!p) continue;
-        FILE* f = fopen(p, "r");
-        if (!f) continue;
-        int val = 0;
-        if (fscanf(f, "%d", &val) == 1) { fclose(f); cached = (float)val; return cached; }
-        fclose(f);
-    }
-    return cached;
+
+void EndGlassCard() {
+    ImGui::EndChild();
 }
 
 // ============================================================================
-// render_window - 完整窗口渲染
-// 完美还原原项目 MainUI.h 的每一行：菜单展开动画 + 窗口 Begin/End +
-// 三栏布局（顶部卡片 + 左侧标签栏 + 右侧内容区）+ 3 个标签页
+// ButtonWithIcon（原版 imgui_widgets.cpp 第829-900行）
+// ============================================================================
+bool ButtonWithIcon(const char* label, const char* subtitle, ImTextureID icon, const ImVec2& size_arg, ImGuiButtonFlags flags)
+{
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems)
+        return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
+    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
+    const ImVec2 subtitle_size = ImGui::CalcTextSize(subtitle, NULL, true);
+
+    ImVec2 pos = window->DC.CursorPos;
+    if ((flags & ImGuiButtonFlags_AlignTextBaseLine) && style.FramePadding.y < window->DC.CurrLineTextBaseOffset)
+        pos.y += window->DC.CurrLineTextBaseOffset - style.FramePadding.y;
+
+    // 计算所需尺寸
+    float icon_size = 70.0f;           // 图标大小
+    float left_margin = 10.0f;         // 图标左边距
+    float icon_text_spacing = 10.0f;   // 图标与文本间距
+    float text_width = ImMax(label_size.x, subtitle_size.x);
+    float text_height = label_size.y + subtitle_size.y + 2.0f;  // 两行文本总高度
+
+    ImVec2 size = ImGui::CalcItemSize(size_arg,
+        left_margin + icon_size + icon_text_spacing + text_width + style.FramePadding.x * 2.0f,
+        ImMax(icon_size, text_height) + style.FramePadding.y * 2.0f);
+
+    const ImRect bb(pos, pos + size);
+    ImGui::ItemSize(size, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bb, id))
+        return false;
+
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, flags);
+
+    ImDrawList* draw_list = window->DrawList;
+
+    // 计算图标位置（垂直居中）
+    float icon_x = bb.Min.x + left_margin;
+    float icon_y = bb.Min.y + (size.y - icon_size) * 0.5f;
+    ImVec2 icon_min(icon_x, icon_y);
+    ImVec2 icon_max(icon_x + icon_size, icon_y + icon_size);
+
+    // 渲染图标
+    ImU32 icon_tint = hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(220, 220, 220, 255);
+    draw_list->AddImage(icon, icon_min, icon_max, ImVec2(0, 0), ImVec2(1, 1), icon_tint);
+
+    // 计算文本位置
+    float text_start_x = icon_x + icon_size + icon_text_spacing;
+    float total_text_height = label_size.y + subtitle_size.y + 2.0f;
+    float text_start_y = bb.Min.y + (size.y - total_text_height) * 0.5f;
+
+    // 渲染主文本（第一行）
+    ImVec2 label_pos(text_start_x, text_start_y);
+    ImU32 label_color = ImGui::GetColorU32(ImGuiCol_Text);
+    if (hovered)
+        label_color = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+    draw_list->AddText(label_pos, label_color, label);
+
+    // 渲染副文本（第二行，灰色）
+    ImVec2 subtitle_pos(text_start_x, text_start_y + label_size.y + 2.0f);
+    ImU32 subtitle_color = IM_COL32(128, 128, 128, 255);  // 灰色
+    if (hovered)
+        subtitle_color = IM_COL32(160, 160, 160, 255);    // 悬停时稍亮
+    draw_list->AddText(subtitle_pos, subtitle_color, subtitle);
+
+    if (g.LogEnabled)
+        ImGui::LogSetNextTextDecoration("[", "]");
+
+    return pressed;
+}
+
+// ============================================================================
+// ButtonTab（原版 imgui_widgets.cpp 第1855-1970行）
+// ============================================================================
+bool ButtonTab(const char* label, const ImVec2& size_arg, ImGuiButtonFlags flags)
+{
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems)
+        return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
+    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
+
+    ImVec2 pos = window->DC.CursorPos;
+    if ((flags & ImGuiButtonFlags_AlignTextBaseLine) && style.FramePadding.y < window->DC.CurrLineTextBaseOffset)
+        pos.y += window->DC.CurrLineTextBaseOffset - style.FramePadding.y;
+    ImVec2 size = ImGui::CalcItemSize(size_arg, label_size.x + style.FramePadding.x * 2.0f, label_size.y + style.FramePadding.y * 2.0f);
+
+    const ImRect bb(pos, pos + size);
+    ImGui::ItemSize(size, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bb, id))
+        return false;
+
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, flags);
+
+    static ImGuiID current_selected_id = 0;
+    static ImVec2 target_rect_pos = ImVec2(0, 0);
+    static ImVec2 current_rect_pos = ImVec2(0, 0);
+    static ImVec2 target_rect_size = ImVec2(0, 0);
+    static ImVec2 current_rect_size = ImVec2(0, 0);
+    static float anim_alpha = 0.4f;
+    static bool first_frame = true;
+    static bool background_drawn = false;
+
+    bool selected = (current_selected_id == id);
+
+    // 默认选中主页
+    static bool home_initialized = false;
+    static ImGuiID home_id = 0;
+
+    if (id == window->GetID(ICON_FA_HOUSE""))
+    {
+        home_id = id;
+        if (!home_initialized)
+        {
+            current_selected_id = id;
+            home_initialized = true;
+        }
+    }
+
+    if (first_frame)
+    {
+        target_rect_pos = pos;
+        current_rect_pos = target_rect_pos;
+        target_rect_size = size;
+        current_rect_size = target_rect_size;
+        first_frame = false;
+        anim_alpha = 1.0f;
+    }
+
+    if (selected)
+    {
+        target_rect_pos = pos;
+        target_rect_size = size;
+    }
+
+    float move_t = 0.08f;
+    current_rect_pos.x = current_rect_pos.x + (target_rect_pos.x - current_rect_pos.x) * move_t;
+    current_rect_pos.y = current_rect_pos.y + (target_rect_pos.y - current_rect_pos.y) * move_t;
+    current_rect_size.x = current_rect_size.x + (target_rect_size.x - current_rect_size.x) * move_t;
+    current_rect_size.y = current_rect_size.y + (target_rect_size.y - current_rect_size.y) * move_t;
+
+    float target_alpha = selected ? 1.0f : 1.0f;
+    if (anim_alpha < target_alpha)
+        anim_alpha = ImMin(anim_alpha + g.IO.DeltaTime * 4.0f, target_alpha);
+    else if (anim_alpha > target_alpha)
+        anim_alpha = ImMax(anim_alpha - g.IO.DeltaTime * 4.0f, target_alpha);
+
+    // 绘制 Mac 蓝色毛玻璃背景矩形
+    if (!background_drawn)
+    {
+        float radius = current_rect_size.y * 0.5f;
+        ImColor bg_color = ImColor(0.0f, 122/255.0f, 1.0f, selected ? 0.75f : anim_alpha * 0.5f);
+        window->DrawList->AddRectFilled(current_rect_pos, current_rect_pos + current_rect_size, bg_color, radius, ImDrawFlags_RoundCornersRight);
+        background_drawn = true;
+    }
+
+    // 绘制文本（包含图标）- 水平居中
+    ImVec4 text_color = selected ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ImVec4(89/255.0f, 89/255.0f, 89/255.0f, 1.0f);
+
+    // 水平居中计算
+    float text_x = pos.x + (size.x - label_size.x) * 0.5f;
+    float text_y = pos.y + (size.y - label_size.y) * 0.5f;
+    ImVec2 text_pos = ImVec2(text_x, text_y);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+    ImGui::RenderText(text_pos, label);
+    ImGui::PopStyleColor();
+
+    // 重置背景绘制标志
+    if (id == home_id || id == window->GetID(ICON_FA_GEAR""))
+        background_drawn = false;
+
+    if (pressed)
+    {
+        current_selected_id = id;
+        target_rect_pos = pos;
+        target_rect_size = size;
+        anim_alpha = 1.0f;
+    }
+
+    return pressed;
+}
+
+// ============================================================================
+// HorizontalToggleBar（原版 imgui_widgets.cpp 第3013-3208行）
+// ============================================================================
+bool HorizontalToggleBar(const char* label, int* current_item, const char* const items[], int items_count)
+{
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems)
+        return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+
+    ImGui::PushID(label);
+    const ImGuiID id = window->GetID(label);
+
+    // 尺寸参数
+    const float bar_height = 60.0f;
+    const float toggle_height = 40.0f;  // 高度距顶部10，底部10 = 60 - 10 - 10 = 40
+    const float rounding = toggle_height * 0.5f;  // 纯圆角（胶囊形）
+    const float left_margin = 10.0f;
+    const float right_margin = 10.0f;
+    const float toggle_area_width = 300.0f;
+
+    // 文本尺寸
+    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
+
+    // 宽度-1自动填满父容器
+    ImVec2 size_arg(-1.0f, bar_height);
+    ImVec2 actual_size = ImGui::CalcItemSize(size_arg, label_size.x + toggle_area_width + left_margin + right_margin, bar_height);
+
+    const float total_width = actual_size.x;
+    const float total_height = actual_size.y;
+
+    const ImVec2 pos = window->DC.CursorPos;
+    const ImRect total_bb(pos, pos + ImVec2(total_width, total_height));
+
+    ImGui::ItemSize(total_bb, style.FramePadding.y);
+    if (!ImGui::ItemAdd(total_bb, id))
+    {
+        ImGui::PopID();
+        return false;
+    }
+
+    // 文本区域（左侧，距离左边框10）
+    ImRect text_bb(
+        ImVec2(pos.x + left_margin, pos.y),
+        ImVec2(pos.x + left_margin + label_size.x, pos.y + total_height)
+    );
+
+    // 切换条区域（右侧，距离右边框10，距顶部和底部各10）
+    ImRect toggle_bb(
+        ImVec2(pos.x + total_width - right_margin - toggle_area_width,
+               pos.y + 10.0f),  // 距顶部10
+        ImVec2(pos.x + total_width - right_margin,
+               pos.y + total_height - 10.0f)  // 距底部10
+    );
+
+    // 轨道总有效宽度，等分每个选项
+    const float toggle_total_width = toggle_bb.Max.x - toggle_bb.Min.x;
+    const float item_width = toggle_total_width / items_count;
+
+    // 交互检测
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(total_bb, id, &hovered, &held);
+
+    // 处理点击
+    bool value_changed = false;
+    if (pressed && hovered)
+    {
+        ImVec2 local_mouse_pos = ImGui::GetMousePos();
+        float toggle_left = toggle_bb.Min.x;
+
+        for (int i = 0; i < items_count; i++)
+        {
+            ImRect item_bb(
+                ImVec2(toggle_left + item_width * i, toggle_bb.Min.y),
+                ImVec2(toggle_left + item_width * (i + 1), toggle_bb.Max.y)
+            );
+
+            if (item_bb.Contains(local_mouse_pos))
+            {
+                if (*current_item != i)
+                {
+                    *current_item = i;
+                    value_changed = true;
+                    ImGui::MarkItemEdited(id);
+                }
+                break;
+            }
+        }
+    }
+
+    // 持久化激活态
+    ImGuiStorage* storage = window->DC.StateStorage;
+    bool* is_active = storage->GetBoolRef(id, false);
+    if (pressed) *is_active = !(*is_active);
+
+    // 动画状态
+    float* animation_pos = storage->GetFloatRef(id + items_count, 0.0f);
+    const float target_pos = item_width * (*current_item);
+    const float animation_speed = 0.06f;
+
+    if (*animation_pos != target_pos)
+    {
+        float delta = target_pos - *animation_pos;
+        *animation_pos += delta * animation_speed;
+        if (fabs(*animation_pos - target_pos) < 0.5f)
+            *animation_pos = target_pos;
+    }
+
+    // 动画位移与缩放
+    float* anim_y = storage->GetFloatRef(id + 0x1000, 0.0f);
+    float* anim_scale = storage->GetFloatRef(id + 0x2000, 1.0f);
+    const float dt = g.IO.DeltaTime;
+    const float speed = 8.0f;
+
+    float target_y = (hovered && !held) ? -2.0f : 0.0f;
+    *anim_y = ImLerp(*anim_y, target_y, dt * speed);
+
+    float target_scale = (held && hovered) ? 0.98f : 1.0f;
+    *anim_scale = ImLerp(*anim_scale, target_scale, dt * speed);
+
+    ImVec2 center = total_bb.GetCenter();
+    ImVec2 animated_size = total_bb.GetSize() * *anim_scale;
+    ImRect animated_bb(
+        ImVec2(center.x - animated_size.x * 0.5f, center.y - animated_size.y * 0.5f + *anim_y),
+        ImVec2(center.x + animated_size.x * 0.5f, center.y + animated_size.y * 0.5f + *anim_y)
+    );
+
+    // 重新计算动画后的区域
+    ImRect animated_text_bb(
+        ImVec2(animated_bb.Min.x + left_margin, animated_bb.Min.y),
+        ImVec2(animated_bb.Min.x + left_margin + label_size.x, animated_bb.Max.y)
+    );
+
+    ImRect animated_toggle_bb(
+        ImVec2(animated_bb.Max.x - right_margin - toggle_area_width,
+               animated_bb.Min.y + 10.0f),  // 距顶部10
+        ImVec2(animated_bb.Max.x - right_margin,
+               animated_bb.Max.y - 10.0f)  // 距底部10
+    );
+    const float animated_toggle_width = animated_toggle_bb.GetWidth();
+    const float animated_item_width = animated_toggle_width / items_count;
+
+    // 配色规则
+    ImU32 col_text;
+    if (held && hovered) {
+        col_text = IM_COL32(255, 255, 255, 255);
+    } else if (*is_active) {
+        col_text = IM_COL32(255, 255, 255, 255);
+    } else if (hovered) {
+        col_text = IM_COL32(22, 119, 255, 255);
+    } else {
+        col_text = IM_COL32(102, 102, 102, 255);
+    }
+
+    // 切换条颜色
+    ImU32 col_toggle_border = IM_COL32(200, 200, 200, 255);
+    ImU32 col_toggle_active = IM_COL32(22, 119, 255, 255);
+
+    // 绘制标签文本（左侧，垂直居中）
+    ImVec2 animated_text_pos(
+        animated_text_bb.Min.x,
+        animated_text_bb.Min.y + (animated_text_bb.GetHeight() - label_size.y) * 0.5f
+    );
+    window->DrawList->AddText(animated_text_pos, col_text, label);
+
+    // 绘制切换条边框（只有边框，无背景，纯圆角）
+    window->DrawList->AddRect(animated_toggle_bb.Min, animated_toggle_bb.Max, col_toggle_border, rounding, 0, 1.5f);
+
+    // 绘制活跃滑块（纯圆角）
+    const ImRect slider_bb(
+        ImVec2(animated_toggle_bb.Min.x + *animation_pos, animated_toggle_bb.Min.y),
+        ImVec2(animated_toggle_bb.Min.x + *animation_pos + animated_item_width, animated_toggle_bb.Max.y)
+    );
+    window->DrawList->AddRectFilled(slider_bb.Min, slider_bb.Max, col_toggle_active, rounding);
+
+    // 绘制所有选项文本
+    for (int i = 0; i < items_count; i++)
+    {
+        const char* item_text = items[i];
+        ImVec2 text_size = ImGui::CalcTextSize(item_text, NULL, true);
+
+        float item_center_x = animated_toggle_bb.Min.x + animated_item_width * i + animated_item_width * 0.5f;
+        ImVec2 item_text_pos(
+            item_center_x - text_size.x * 0.5f,
+            animated_toggle_bb.Min.y + (animated_toggle_bb.GetHeight() - text_size.y) * 0.5f
+        );
+
+        bool is_over_slider = (item_center_x >= slider_bb.Min.x && item_center_x <= slider_bb.Max.x);
+        ImU32 item_color = is_over_slider ? IM_COL32(255, 255, 255, 255) : IM_COL32(102, 102, 102, 255);
+
+        window->DrawList->AddText(item_text_pos, item_color, item_text);
+    }
+
+    ImGui::RenderNavHighlight(total_bb, id);
+    ImGui::PopID();
+    return value_changed;
+}
+
+// ============================================================================
+// render_window（原版 MainUI.h 第1-270行，严格逐行移植）
 // ============================================================================
 void render_window() {
-    // === 菜单展开动画（原项目 MainUI.h 第 1-19 行）===
-    // 原项目用 MainAuraOne（音量键切换）控制，这里菜单始终展开
-    static bool MainAuraOne = true;
-    static bool last_menu_state = false;
-    static float menu_expand = 0.0f;
-
+    // === 菜单展开动画（MainUI.h 第1-19行）===
     if (MainAuraOne) {
-        if (!last_menu_state) last_menu_state = true;
+        if (!last_menu_state) {
+            last_menu_state = true;
+        }
         float delta = ImGui::GetIO().DeltaTime;
         menu_expand += (1.0f - menu_expand) * delta * 12.0f;
         menu_expand = fminf(1.0f, menu_expand);
     } else {
-        if (last_menu_state) last_menu_state = false;
+        if (last_menu_state) {
+            last_menu_state = false;
+        }
         float delta = ImGui::GetIO().DeltaTime;
         menu_expand += (0.0f - menu_expand) * delta * 15.0f;
         menu_expand = fmaxf(0.0f, menu_expand);
     }
     if (menu_expand < 0.01f && !MainAuraOne) {
+        UpdateBlurWindow({}, {}, 0, false, 0);
         return;
     }
-
     float width_factor = menu_expand;
     float min_width = 2.0f;
+    float current_width = min_width + (1200.0f - min_width) * width_factor;
 
-    // 窗口尺寸：原项目固定 1200x800，这里根据屏幕自适应（大屏保持 1200x800）
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    float max_w = viewport->Size.x * 0.92f;
-    float max_h = viewport->Size.y * 0.88f;
-    float target_w = fminf(1200.0f, max_w);
-    float target_h = fminf(800.0f, max_h);
-    float current_width = min_width + (target_w - min_width) * width_factor;
-
-    // === 标签切换动画（原项目 MainUI.h 第 23-39 行）===
+    // === 标签切换动画（MainUI.h 第23-39行）===
     static int Tab_Main = 1;
     static int prev_Tab_Main = 1;
     static float tab_alpha = 1.0f;
     static bool tab_is_animating = false;
+    static float 模糊强度 = 0.8;
     if (prev_Tab_Main != Tab_Main) {
         tab_is_animating = true;
         tab_alpha = 0.0f;
@@ -764,250 +956,240 @@ void render_window() {
         }
     }
 
-    // === 窗口样式（原项目 MainUI.h 第 40-53 行）===
+    // === 窗口样式（MainUI.h 第40-53行）===
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.0f, 1.0f, 1.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 40.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
-    ImGuiWindowFlags mainWindowFlags = ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove;
-
-    ImVec2 window_pos = ImVec2(
-        (viewport->Pos.x + viewport->Size.x * 0.5f) - (current_width * 0.5f),
-        (viewport->Pos.y + viewport->Size.y * 0.5f) - (target_h * 0.5f));
-    ImVec2 window_size = ImVec2(current_width, target_h);
+    ImGuiWindowFlags mainWindowFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove;
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 window_pos = ImVec2((viewport->Pos.x + viewport->Size.x * 0.5f) - (current_width * 0.5f),(viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f);
+    ImVec2 window_size = ImVec2(current_width, 800.0f);
     ImGui::SetNextWindowPos(window_pos);
-    ImGui::SetNextWindowSize(ImVec2(current_width, target_h));
-
-    // 毛玻璃背景（原项目用 UpdateBlurWindow，这里用半透明深色背景模拟）
-    {
-        ImDrawList* bg_dl = ImGui::GetBackgroundDrawList();
-        ImU32 blur_col = IM_COL32(15, 15, 20, (int)(200 * width_factor));
-        bg_dl->AddRectFilled(window_pos,
-            ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
-            blur_col, 40.0f);
-    }
-
+    ImGui::SetNextWindowSize(ImVec2(current_width, 800.0f));
+    UpdateBlurWindow(window_pos, window_size, 40.0f, true, 255);
     float content_alpha = fminf(1.0f, (width_factor - 0.2f) / 0.6f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, content_alpha);
-
-    if (ImGui::Begin("\xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a", nullptr, mainWindowFlags)) {
+    if (ImGui::Begin("MainAuraNexusUI", nullptr, mainWindowFlags)) {
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-        // === 顶部卡片（原项目 MainUI.h 第 56-78 行）===
+        // === 顶部卡片 BidirectionalCard1（MainUI.h 第56-78行）===
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard1", ImVec2(-1, 100), false, ImGuiWindowFlags_NoScrollbar);
-        {
-            ImVec2 child_pos = ImGui::GetWindowPos();
-            ImVec2 child_size = ImGui::GetWindowSize();
-            draw_list->AddRectFilled(child_pos,
-                ImVec2(child_pos.x + child_size.x, child_pos.y + child_size.y),
-                ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)),
-                40.0f, ImDrawFlags_RoundCornersTop);
-
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::SetCursorPosX(10.0f); ImGui::SetCursorPosY(10.0f);
-            float CardWidth1 = ImGui::GetContentRegionAvail().x - 10.0f;
-            float CardHeight1 = ImGui::GetContentRegionAvail().y - 10.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-            if (ImGui::BeginChild("MainAuraNexusUI_Card1", ImVec2(CardWidth1, CardHeight1), false, ImGuiWindowFlags_NoScrollbar)) {
-                if (ButtonWithIcon("\xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a",
-                                   "Unity \xe9\x80\x9a\xe7\x94\xa8\xe6\xb3\xa8\xe5\x85\xa5\xe6\xa8\xa1\xe6\x9d\xbf",
-                                   ImVec2(300, -1))) { }
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor();
+        ImVec2 child_pos = ImGui::GetWindowPos();
+        ImVec2 child_size = ImGui::GetWindowSize();
+        draw_list->AddRectFilled(child_pos, ImVec2(child_pos.x + child_size.x, child_pos.y + child_size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)), 40.0f, ImDrawFlags_RoundCornersTop);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::SetCursorPosX(10.0f);ImGui::SetCursorPosY(10.0f);
+        float CardWidth1 = ImGui::GetContentRegionAvail().x - 10.0f;
+        float CardHeight1 = ImGui::GetContentRegionAvail().y - 10.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+        if (ImGui::BeginChild("MainAuraNexusUI_Card1", ImVec2(CardWidth1, CardHeight1), false, ImGuiWindowFlags_NoScrollbar)) {
+            if (ButtonWithIcon("\xe7\xbd\x91\xe6\x98\x93\xe4\xba\x91", "\xe8\xa3\xb8\xe5\xa5\x94\xe5\x8a\x9f\xe8\x83\xbd", LOGO, ImVec2(300, -1))) { }
         }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
 
-        // === 左侧标签栏（原项目 MainUI.h 第 79-103 行）===
+        // === 左侧标签栏 BidirectionalCard2（MainUI.h 第79-103行）===
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard2", ImVec2(200, -1), false, ImGuiWindowFlags_NoScrollbar);
-        {
-            ImVec2 child_pos1 = ImGui::GetWindowPos();
-            ImVec2 child_size1 = ImGui::GetWindowSize();
-            draw_list->AddRectFilled(child_pos1,
-                ImVec2(child_pos1.x + child_size1.x, child_pos1.y + child_size1.y),
-                ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)),
-                40.0f, ImDrawFlags_RoundCornersBottomLeft);
-
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::SetCursorPosX(0.0f); ImGui::SetCursorPosY(15.0f);
-            float CardWidth2 = ImGui::GetContentRegionAvail().x;
-            float CardHeight2 = ImGui::GetContentRegionAvail().y - 10.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-            if (ImGui::BeginChild("MainAuraNexusUI_Card2", ImVec2(CardWidth2, CardHeight2), false, ImGuiWindowFlags_NoScrollbar)) {
-                // 三个标签按钮（原项目用 FontAwesome 图标，这里用中文文字）
-                if (ButtonTab("\xe4\xb8\xbb\xe9\xa1\xb5", ImVec2(-1, 80), 1, &Tab_Main)) {}
-                if (ButtonTab("\xe5\x8a\x9f\xe8\x83\xbd", ImVec2(-1, 80), 2, &Tab_Main)) {}
-                if (ButtonTab("\xe8\xae\xbe\xe7\xbd\xae", ImVec2(-1, 80), 3, &Tab_Main)) {}
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor();
+        ImVec2 child_pos1 = ImGui::GetWindowPos();
+        ImVec2 child_size1 = ImGui::GetWindowSize();
+        draw_list->AddRectFilled(child_pos1, ImVec2(child_pos1.x + child_size1.x, child_pos1.y + child_size1.y), ImGui::ColorConvertFloat4ToU32(ImVec4(255/255.f, 255/255.f, 255/255.f, 0.5f)), 40.0f, ImDrawFlags_RoundCornersBottomLeft);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::SetCursorPosX(0.0f);ImGui::SetCursorPosY(15.0f);
+        float CardWidth2 = ImGui::GetContentRegionAvail().x;
+        float CardHeight2 = ImGui::GetContentRegionAvail().y - 10.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+        if (ImGui::BeginChild("MainAuraNexusUI_Card2", ImVec2(CardWidth2, CardHeight2), false, ImGuiWindowFlags_NoScrollbar)) {
+            if (ButtonTab(ICON_FA_HOUSE"", ImVec2(-1, 80))) { Tab_Main = 1; }
+            if (ButtonTab(ICON_FA_CROSSHAIRS"", ImVec2(-1, 80))) { Tab_Main = 2; }
+            if (ButtonTab(ICON_FA_GEAR"", ImVec2(-1, 80))) { Tab_Main = 3; }
         }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
 
         ImGui::SameLine();
 
-        // === 右侧内容区（原项目 MainUI.h 第 105-265 行）===
+        // === 右侧内容区 BidirectionalCard3（MainUI.h 第105-265行）===
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard3", ImVec2(-1, -1), false,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
-        {
-            // 左上角圆角装饰（原项目 MainUI.h 第 109-119 行）
-            ImVec2 origin = ImGui::GetCursorScreenPos();
-            ImVec2 o = origin;
-            ImVec2 a = ImVec2(origin.x + 0.5f, origin.y + 40);
-            ImVec2 b = ImVec2(origin.x + 40, origin.y);
-            ImVec2 center = ImVec2(origin.x + 40, origin.y + 40);
-            float radius = 40.0f;
-            draw_list->PathClear();
-            draw_list->PathLineTo(o);
-            draw_list->PathLineTo(a);
-            draw_list->PathArcTo(center, radius, IM_PI, IM_PI * 1.5f, 16);
-            draw_list->PathFillConvex(IM_COL32(255, 255, 255, 128));
+        ImGui::BeginChild("MainAuraNexusUI_BidirectionalCard3", ImVec2(-1, -1), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImVec2 o = origin;
+        ImVec2 a = ImVec2(origin.x + 0.5, origin.y + 40);
+        ImVec2 b = ImVec2(origin.x + 40, origin.y);
+        ImVec2 center = ImVec2(origin.x + 40, origin.y + 40);
+        float radius = 40.0f;
+        draw_list->PathClear();
+        draw_list->PathLineTo(o);
+        draw_list->PathLineTo(a);
+        draw_list->PathArcTo(center, radius, IM_PI, IM_PI * 1.5f, 16);
+        draw_list->PathFillConvex(IM_COL32(255, 255, 255, 128));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::SetCursorPosX(10.0f);ImGui::SetCursorPosY(15.0f);
+        float CardWidth3 = ImGui::GetContentRegionAvail().x - 10.0f;
+        float CardHeight3 = ImGui::GetContentRegionAvail().y - 10.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, tab_alpha);
+        if (ImGui::BeginChild("MainAuraNexusUI_Card3", ImVec2(CardWidth3, CardHeight3), false, ImGuiWindowFlags_NoScrollbar)) {
 
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::SetCursorPosX(10.0f); ImGui::SetCursorPosY(15.0f);
-            float CardWidth3 = ImGui::GetContentRegionAvail().x - 10.0f;
-            float CardHeight3 = ImGui::GetContentRegionAvail().y - 10.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
-            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, tab_alpha);
-            if (ImGui::BeginChild("MainAuraNexusUI_Card3", ImVec2(CardWidth3, CardHeight3), false, ImGuiWindowFlags_NoScrollbar)) {
-
-                // === 标签页 1：主页（原项目 MainUI.h 第 129-163 行）===
-                if (Tab_Main == 1) {
-                    ImGui::Columns(2, nullptr, false);
-                    if (BeginGlassCard("HomeCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf");
-                        ImGui::Spacing();
-                        ImGui::Text("FPS: %d", (int)get_fps());
-                        ImGui::Separator();
-                        ImGui::Text("CPU: %d%%", (int)get_cpu());
-                        ImGui::Text("GPU: %d%%", (int)get_gpu());
-                        ImGui::Text("\xe5\x86\x85\xe5\xad\x98: %d%%", (int)get_ram());
-                        ImGui::Separator();
-                        DrawSystemInfoCard(SystemInfoType::FPS, get_fps(), ImVec2(-1, 100));
+            // ===== 标签页 1：主页（MainUI.h 第129-163行）=====
+            if (Tab_Main == 1) {
+                ImGui::Columns(2, nullptr, false);
+                if (BeginGlassCard("HomeCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    DrawAuraSectionTitle("\xe6\xb8\xb8\xe6\x88\x8f\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96"); // 游戏初始化
+                    ImGui::Spacing();
+                    if (ImGui::Button("\xe5\x90\xaf\xe5\x8a\xa8\xe6\xb8\xb8\xe6\x88\x8f\xe5\xb9\xb6\xe6\xb3\xa8\xe5\x85\xa5", ImVec2(-1, 70))) { // 启动游戏并注入
+                        std::thread([](){ lb_init_game(); }).detach();
                     }
-                    EndGlassCard();
-                    ImGui::NextColumn();
-                    if (BeginGlassCard("HomeCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe9\xa1\xb9\xe7\x9b\xae\xe4\xbf\xa1\xe6\x81\xaf");
-                        ImGui::Spacing();
-                        ImGui::TextUnformatted("\xe9\xa1\xb9\xe7\x9b\xae: \xe5\x8f\xaf\xe4\xb8\x80\xe5\xae\x9a");
-                        ImGui::Separator();
-                        ImGui::TextUnformatted("Unity \xe9\x80\x9a\xe7\x94\xa8\xe6\xb3\xa8\xe5\x85\xa5\xe6\xa8\xa1\xe6\x9d\xbf");
-                        ImGui::Separator();
-                        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-                        ImGui::Separator();
-                        const char* Antirecordingscreen[] = {"\xe5\x8f\xaf\xe5\xbd\x95\xe5\xb1\x8f", "\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f"};
-                        static int Prevent = 0;
-                        HorizontalToggleBar("\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f\xe8\xae\xbe\xe7\xbd\xae", &Prevent, Antirecordingscreen, 2);
+                    ImGui::Separator();
+                    if (ImGui::Button("\xe6\x97\xa0\xe7\x97\x95\xe9\x80\x80\xe5\x87\xba\xe7\xa8\x8b\xe5\xba\x8f", ImVec2(-1, 50))) { // 无痕退出程序
+                        std::thread([](){ lb_clean_exit(); }).detach();
                     }
-                    EndGlassCard();
-                    ImGui::Columns(1);
+                    ImGui::Separator();
+                    ImGui::TextColored(lb_gjc_injected ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1),
+                        "\xe8\xbf\x87\xe6\xa3\x80\xe6\xb5\x8b: %s", lb_gjc_status.c_str()); // 过检测
+                    ImGui::Separator();
+                    ImGui::Text("\xe6\xb8\xb8\xe6\x88\x8f\xe8\xbf\x9b\xe7\xa8\x8b: %s", lb_game_running ? "\xe6\xad\xa3\xe5\xb8\xb8" : "\xe6\x9c\xaa\xe5\xb0\xb1\xe7\xbb\xaa"); // 游戏进程: 正常/未就绪
+                    ImGui::Text("\xe5\x9f\xba\xe5\x9d\x80\xe7\x8a\xb6\xe6\x80\x81: %s", lb_base_libUE4 ? "\xe5\xb7\xb2\xe8\x8e\xb7\xe5\x8f\x96" : "\xe6\x9c\xaa\xe8\x8e\xb7\xe5\x8f\x96"); // 基址状态: 已获取/未获取
                 }
-                // === 标签页 2：功能（原项目 MainUI.h 第 164-228 行）===
-                else if (Tab_Main == 2) {
-                    ImGui::Columns(2, nullptr, false);
-                    if (BeginGlassCard("LB_Card1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe5\x8a\x9f\xe8\x83\xbd\xe5\xbc\x80\xe5\x85\xb3");
-                        ImGui::Spacing();
-                        static bool feat1 = false, feat2 = false, feat3 = false, feat4 = false;
-                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x80", &feat1)) {}
-                        ImGui::Separator();
-                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xba\x8c", &feat2)) {}
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
-                        static float hv = 90.0f;
-                        if (ImGui::SliderFloat("##head", &hv, 50, 150)) {}
-                        ImGui::Separator();
-                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe4\xb8\x89", &feat3)) {}
-                        ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
-                        static float bv = 80.0f;
-                        if (ImGui::SliderFloat("##body", &bv, 50, 150)) {}
-                        ImGui::Separator();
-                        if (ImGui::Checkbox("\xe5\x8a\x9f\xe8\x83\xbd\xe5\x9b\x9b", &feat4)) {}
-                        ImGui::Separator();
-                        static float slider1 = 0.5f;
-                        ImGui::SliderFloat("\xe6\x95\xb0\xe5\x80\xbc\xe8\xb0\x83\xe8\x8a\x82", &slider1, 0.0f, 1.0f);
-                    }
-                    EndGlassCard();
-                    ImGui::NextColumn();
-                    if (BeginGlassCard("LB_Card2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe9\xab\x98\xe7\xba\xa7\xe9\x80\x89\xe9\xa1\xb9");
-                        ImGui::Spacing();
-                        const char* modes[] = {"\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x80", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xba\x8c", "\xe6\xa8\xa1\xe5\xbc\x8f\xe4\xb8\x89"};
-                        static int mode = 0;
-                        HorizontalToggleBar("\xe8\xbf\x90\xe8\xa1\x8c\xe6\xa8\xa1\xe5\xbc\x8f", &mode, modes, 3);
-                        ImGui::Separator();
-                        const char* modes2[] = {"\xe5\xbc\x80", "\xe5\x85\xb3"};
-                        static int mode2 = 0;
-                        HorizontalToggleBar("\xe8\xb0\x83\xe8\xaf\x95\xe6\xa8\xa1\xe5\xbc\x8f", &mode2, modes2, 2);
-                    }
-                    EndGlassCard();
-                    ImGui::Columns(1);
+                EndGlassCard();
+                ImGui::NextColumn();
+                if (BeginGlassCard("HomeCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    DrawAuraSectionTitle("\xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf"); // 系统信息
+                    ImGui::Spacing();
+                    ImGui::Text("FPS: %d", GetRealFPS());
+                    ImGui::Text("CPU: %d%%", GetRealCPU());
+                    ImGui::Text("GPU: %d%%", GetRealGPU());
+                    ImGui::Text("\xe5\x86\x85\xe5\xad\x98: %d%%", GetRealRAMPercent()); // 内存
+                    ImGui::Separator();
+                    const char* Antirecordingscreen[] = {"\xe5\x8f\xaf\xe5\xbd\x95\xe5\xb1\x8f", "\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f"}; // 可录屏/防录屏
+                    if (HorizontalToggleBar("\xe9\x98\xb2\xe5\xbd\x95\xe5\xb1\x8f\xe8\xae\xbe\xe7\xbd\xae", &Prevent, Antirecordingscreen, 2)) { } // 防录屏设置
                 }
-                // === 标签页 3：设置（原项目 MainUI.h 第 229-257 行）===
-                else if (Tab_Main == 3) {
-                    ImGui::Columns(2, nullptr, false);
-                    if (BeginGlassCard("SetCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe6\x98\xbe\xe7\xa4\xba\xe8\xae\xbe\xe7\xbd\xae");
-                        ImGui::Spacing();
-                        static float FPSControlSize = 60.0f;
-                        ImGui::SliderFloat("\xe5\xb8\xa7\xe7\x8e\x87", &FPSControlSize, 0.0f, 165.0f, "%.0f");
-                        ImGui::Separator();
-                        static float blur_strength = 0.8f;
-                        ImGui::SliderFloat("\xe6\xa8\xa1\xe7\xb3\x8a\xe5\xbc\xba\xe5\xba\xa6", &blur_strength, 0, 1, "%.1f");
-                        ImGui::Separator();
-                        const char* background_modes[] = {"\xe6\x9c\x89\xe5\x90\x8e\xe5\x8f\xb0", "\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0"};
-                        static int background_mode = 0;
-                        HorizontalToggleBar("\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0\xe8\xae\xbe\xe7\xbd\xae", &background_mode, background_modes, 2);
-                    }
-                    EndGlassCard();
-                    ImGui::NextColumn();
-                    if (BeginGlassCard("SetCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
-                        DrawAuraSectionTitle("\xe7\xbb\x98\xe5\x9b\xbe\xe8\xae\xbe\xe7\xbd\xae");
-                        ImGui::Spacing();
-                        static float ImGuiDrawESP = 0.7f;
-                        ImGui::SliderFloat("\xe4\xba\xba\xe7\x89\xa9\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP, 0.3f, 1.5f, "%.1f");
-                        ImGui::Separator();
-                        static float ImGuiDrawESP2 = 0.7f;
-                        ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3f, 1.5f, "%.1f");
-                        ImGui::Separator();
-                        if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
-                        ImGui::Separator();
-                        if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) {}
-                    }
-                    EndGlassCard();
-                    ImGui::Columns(1);
-                }
-                ImGui::PopStyleVar(); // PopStyleVar(1) for Alpha
+                EndGlassCard();
+                ImGui::Columns(1);
             }
-            ImGui::EndChild();
-            ImGui::PopStyleVar(3);
-            ImGui::PopStyleColor();
+            // ===== 标签页 2：裸奔功能（MainUI.h 第164-228行）=====
+            else if (Tab_Main == 2) {
+                ImGui::Columns(2, nullptr, false);
+                if (BeginGlassCard("LB_Card1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    DrawAuraSectionTitle("\xe5\x8a\x9f\xe8\x83\xbd\xe5\xbc\x80\xe5\x85\xb3"); // 功能开关
+                    ImGui::Spacing();
+                    bool features_enabled = lb_game_ready;
+                    ImGui::BeginDisabled(!features_enabled);
+                    bool luna = lb_feature_luna;
+                    if (ImGui::Checkbox("\xe9\x9c\xb2\xe5\xa8\x9c\xe5\x86\x85\xe9\x80\x8f", &luna)) lb_feature_luna = luna; // 露娜内透
+                    ImGui::Separator();
+                    bool head = lb_feature_head;
+                    if (ImGui::Checkbox("\xe5\xa4\xb4\xe9\x83\xa8\xe8\x8c\x83\xe5\x9b\xb4", &head)) lb_feature_head = head; // 头部范围
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
+                    float hv = lb_head_val; if (ImGui::SliderFloat("##head", &hv, 50, 150)) lb_head_val = hv;
+                    ImGui::Separator();
+                    bool body = lb_feature_body;
+                    if (ImGui::Checkbox("\xe8\xba\xab\xe4\xbd\x93\xe8\x8c\x83\xe5\x9b\xb4", &body)) lb_feature_body = body; // 身体范围
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
+                    float bv = lb_body_val; if (ImGui::SliderFloat("##body", &bv, 50, 150)) lb_body_val = bv;
+                    ImGui::Separator();
+                    static bool abd_enabled = false;
+                    static float abd_val = 99.0f;
+                    if (ImGui::Checkbox("\xe8\x85\xb9\xe9\x83\xa8\xe8\x8c\x83\xe5\x9b\xb4", &abd_enabled)) { // 腹部范围
+                        if (abd_enabled) { if (!lb_freeze_running) { lb_abdominal_target=abd_val; lb_freeze_running=true; lb_freeze_thread=std::thread(lb_freeze_thread_func); lb_freeze_thread.detach(); } }
+                        else lb_freeze_running = false;
+                    }
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120.0f);
+                    if (ImGui::SliderFloat("##abd", &abd_val, 50, 150)) lb_abdominal_target = abd_val;
+                    ImGui::Separator();
+                    bool bullet = lb_feature_bullet;
+                    if (ImGui::Checkbox("\xe5\xad\x90\xe5\xbc\xb9\xe6\x8d\xae\xe7\x82\xb9", &bullet)) { // 子弹据点
+                        lb_feature_bullet = bullet;
+                        if (bullet && lb_bullet_addr) { lb_writeDword(lb_bullet_addr, lb_bullet_val); lb_bullet_frozen=true; } else lb_bullet_frozen=false;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(lb_bullet_frozen ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1), lb_bullet_frozen ? "\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf" : "\xe6\x9c\xaa\xe5\xbc\x80\xe5\x90\xaf"); // 已开启/未开启
+                    ImGui::Separator();
+                    bool norecoil = lb_feature_norecoil;
+                    if (ImGui::Checkbox("\xe5\x85\xa8\xe5\xb1\x80\xe6\x97\xa0\xe5\x90\x8e", &norecoil)) { // 全局无后
+                        lb_feature_norecoil = norecoil;
+                        if (norecoil && lb_norecoil_addr) { lb_writeDword(lb_norecoil_addr, lb_norecoil_val); lb_norecoil_frozen=true; } else lb_norecoil_frozen=false;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(lb_norecoil_frozen ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1), lb_norecoil_frozen ? "\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf" : "\xe6\x9c\xaa\xe5\xbc\x80\xe5\x90\xaf");
+                    ImGui::Separator();
+                    bool tp = lb_feature_thirdperson;
+                    if (ImGui::Checkbox("\xe7\xac\xac\xe4\xb8\x89\xe4\xba\xba\xe7\xa7\xb0", &tp)) { // 第三人称
+                        lb_feature_thirdperson = tp;
+                        if (tp && lb_thirdperson_addr) { lb_writeDword(lb_thirdperson_addr, lb_thirdperson_val); lb_thirdperson_frozen=true; if(!lb_thirdperson_thread.joinable()){lb_thirdperson_thread=std::thread(lb_thirdperson_thread_func);lb_thirdperson_thread.detach();} } else lb_thirdperson_frozen=false;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(lb_thirdperson_frozen ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1), lb_thirdperson_frozen ? "\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf" : "\xe6\x9c\xaa\xe5\xbc\x80\xe5\x90\xaf");
+                    ImGui::Separator();
+                    bool nt = lb_feature_neitou;
+                    if (ImGui::Checkbox("\xe5\x85\xa8\xe5\xb1\x80\xe5\x86\x85\xe9\x80\x8f", &nt)) { // 全局内透
+                        lb_feature_neitou = nt;
+                        if (nt && !lb_neitou_running) { lb_neitou_world_ptr=lb_base_libUE4?lb_base_libUE4:0; lb_neitou_thread=std::thread(lb_neitou_thread_func); lb_neitou_thread.detach(); }
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(lb_neitou_running ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1), "%s", lb_neitou_status.c_str());
+                    ImGui::EndDisabled();
+                }
+                EndGlassCard();
+                ImGui::Columns(1);
+            }
+            // ===== 标签页 3：设置（MainUI.h 第229-257行）=====
+            else if (Tab_Main == 3) {
+                ImGui::Columns(2, nullptr, false);
+                if (BeginGlassCard("SetCard1", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    DrawAuraSectionTitle("\xe6\x98\xbe\xe7\xa4\xba\xe8\xae\xbe\xe7\xbd\xae"); // 显示设置
+                    ImGui::Spacing();
+                    ImGui::SliderFloat("\xe5\xb8\xa7\xe7\x8e\x87", &FPSControlSize, 0.0f, 165.0f, "%.0f"); // 帧率
+                    ImGui::Separator();
+                    ImGui::SliderFloat("\xe6\xa8\xa1\xe7\xb3\x8a\xe5\xbc\xba\xe5\xba\xa6", &模糊强度, 0, 1, "%.1f"); // 模糊强度
+                    ImGui::Separator();
+                    const char* background_modes[] = {"\xe6\x9c\x89\xe5\x90\x8e\xe5\x8f\xb0", "\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0"}; // 有后台/无后台
+                    if (HorizontalToggleBar("\xe6\x97\xa0\xe5\x90\x8e\xe5\x8f\xb0\xe8\xae\xbe\xe7\xbd\xae", &background_mode, background_modes, 2)) { } // 无后台设置
+                }
+                EndGlassCard();
+                ImGui::NextColumn();
+                if (BeginGlassCard("SetCard2", ImVec2(-1, -1), true, ImGuiWindowFlags_NoScrollbar)) {
+                    DrawAuraSectionTitle("\xe7\xbb\x98\xe5\x9b\xbe\xe8\xae\xbe\xe7\xbd\xae"); // 绘图设置
+                    ImGui::Spacing();
+                    ImGui::SliderFloat("\xe4\xba\xba\xe7\x89\xa9\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP, 0.3, 1.5, "%.1f"); // 人物绘图大小
+                    ImGui::Separator();
+                    ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3, 1.5, "%.1f"); // 世界绘图大小
+                    ImGui::Separator();
+                    if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 保存配置
+                    ImGui::Separator();
+                    if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 加载配置
+                }
+                EndGlassCard();
+                ImGui::Columns(1);
+            }
+            ImGui::PopStyleVar();
         }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
