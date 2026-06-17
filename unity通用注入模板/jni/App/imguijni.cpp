@@ -156,19 +156,38 @@ void DrawFloatingWindow() {
 
         // 标签页
         if (ImGui::BeginTabBar("##main_tabs", ImGuiTabBarFlags_None)) {
-            // 首页标签页
-            if (ImGui::BeginTabItem("首页")) {
-                ImGui::TextUnformatted("欢迎使用可一定");
-                ImGui::Separator();
-                ImGui::TextUnformatted("这是一个 Unity 通用注入模板");
-                ImGui::Text("屏幕尺寸: %d x %d", screenWidth, screenHeight);
-                ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-                ImGui::EndTabItem();
-            }
-
             // MD3 动画标签页
             if (ImGui::BeginTabItem("md3动画")) {
                 md3_ui::render_md3_tab();
+                ImGui::EndTabItem();
+            }
+
+            // 设置标签页
+            if (ImGui::BeginTabItem("设置")) {
+                // 基础样式在首次进入时捕获，作为缩放基准
+                static float ui_scale = 1.0f;
+                static ImGuiStyle base_style;
+                static bool base_captured = false;
+                if (!base_captured) {
+                    base_style = ImGui::GetStyle();
+                    base_captured = true;
+                }
+
+                ImGui::TextUnformatted("UI 设置");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // UI 整体大小滑块（同时缩放字体和样式尺寸）
+                if (ImGui::SliderFloat("UI 大小", &ui_scale, 0.5f, 2.0f, "%.2fx")) {
+                    ImGuiStyle& style = ImGui::GetStyle();
+                    style = base_style;
+                    style.ScaleAllSizes(ui_scale);
+                    ImGui::GetIO().FontGlobalScale = ui_scale;
+                }
+                ImGui::Spacing();
+                ImGui::TextUnformatted("拖动滑块调整 UI 整体大小");
+                ImGui::Text("当前缩放: %.2f 倍", ui_scale);
+
                 ImGui::EndTabItem();
             }
 
