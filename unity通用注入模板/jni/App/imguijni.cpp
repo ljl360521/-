@@ -144,6 +144,8 @@ void DrawFloatingWindow() {
     // 直接渲染 AuraNexus Mac 风格毛玻璃 UI（完整窗口，包含 Begin/End）
     // 替换掉原项目的整个悬浮窗口结构
     aura_ui::render_window();
+    // 灵动岛（窗口上方胶囊，点击切换窗口显示/隐藏）
+    aura_ui::render_dynamic_island();
 }
 
 JNIEXPORT void JNICALL

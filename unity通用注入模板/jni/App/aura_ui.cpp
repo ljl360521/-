@@ -910,6 +910,137 @@ bool HorizontalToggleBar(const char* label, int* current_item, const char* const
 }
 
 // ============================================================================
+// render_dynamic_island - 灵动岛（窗口上方胶囊，点击切换窗口显示/隐藏）
+// ============================================================================
+void render_dynamic_island() {
+    // 灵动岛状态
+    static bool is_expanded = false;       // 展开状态（窗口隐藏时展开）
+    static float expand_t = 0.0f;          // 展开/收起动画进度 0~1
+    static float hover_glow = 0.0f;        // 悬停光晕强度
+    static float press_scale = 1.0f;       // 按压缩放
+    static float dot_pulse = 0.0f;         // 收起态圆点呼吸
+
+    const float dt = ImGui::GetIO().DeltaTime;
+
+    // 展开/收起动画（丝滑 lerp）
+    float target_t = is_expanded ? 1.0f : 0.0f;
+    expand_t += (target_t - expand_t) * ImMin(dt * 10.0f, 1.0f);
+
+    // 尺寸参数
+    const float collapsed_w = 180.0f, collapsed_h = 37.0f;
+    const float expanded_w = 280.0f, expanded_h = 64.0f;
+    float current_w = collapsed_w + (expanded_w - collapsed_w) * expand_t;
+    float current_h = collapsed_h + (expanded_h - collapsed_h) * expand_t;
+    const float rounding = current_h * 0.5f;
+
+    // 定位：屏幕顶部居中，紧贴窗口上方
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    float island_x = (viewport->Pos.x + viewport->Size.x * 0.5f) - (current_w * 0.5f);
+    float island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - current_h - 8.0f;
+
+    // 点击区域
+    ImVec2 island_pos(island_x, island_y);
+    ImVec2 island_size(current_w, current_h);
+    ImRect island_bb(island_pos, island_pos + island_size);
+
+    ImGui::SetCursorScreenPos(island_pos);
+    ImGui::InvisibleButton("##DynamicIsland", island_size);
+    bool hovered = ImGui::IsItemHovered();
+    bool pressed = ImGui::IsItemActivated() && ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+
+    // 点击切换
+    if (pressed) {
+        is_expanded = !is_expanded;
+        MainAuraOne = !is_expanded;  // 展开时隐藏窗口，收起时显示窗口
+    }
+
+    // 悬停光晕动画
+    float target_glow = hovered ? 1.0f : 0.0f;
+    hover_glow += (target_glow - hover_glow) * ImMin(dt * 12.0f, 1.0f);
+
+    // 按压缩放动画
+    float target_scale = (held && hovered) ? 0.93f : 1.0f;
+    press_scale += (target_scale - press_scale) * ImMin(dt * 18.0f, 1.0f);
+
+    // 圆点呼吸
+    dot_pulse += dt * 3.0f;
+
+    // 绘制
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+
+    // 计算缩放后的矩形（以中心缩放）
+    ImVec2 center = island_bb.GetCenter();
+    ImVec2 scaled_half = ImVec2(current_w * press_scale * 0.5f, current_h * press_scale * 0.5f);
+    ImRect draw_bb(center - scaled_half, center + scaled_half);
+
+    // 悬停蓝色光晕
+    if (hover_glow > 0.01f) {
+        for (int i = 3; i >= 1; i--) {
+            float glow_r = i * 6.0f * hover_glow;
+            int alpha = (int)(12.0f * hover_glow * (4 - i));
+            draw_list->AddRect(
+                ImVec2(draw_bb.Min.x - glow_r, draw_bb.Min.y - glow_r),
+                ImVec2(draw_bb.Max.x + glow_r, draw_bb.Max.y + glow_r),
+                IM_COL32(0, 122, 255, alpha),
+                rounding + glow_r, 0, 1.5f
+            );
+        }
+    }
+
+    // 主体黑色背景
+    draw_list->AddRectFilled(draw_bb.Min, draw_bb.Max, IM_COL32(0, 0, 0, 245), rounding);
+
+    // 边框微光
+    ImU32 border_col = IM_COL32(60, 60, 60, 80);
+    if (hover_glow > 0.01f) {
+        int b = (int)(60 + 100 * hover_glow);
+        int a = (int)(80 + 120 * hover_glow);
+        border_col = IM_COL32(0, 122, 255, a);
+    }
+    draw_list->AddRect(draw_bb.Min, draw_bb.Max, border_col, rounding, 0, 1.0f);
+
+    // 内容绘制
+    if (expand_t < 0.5f) {
+        // === 收起态：两个小圆点 ===
+        float dot_alpha = 1.0f - expand_t * 2.0f;
+        float dot_r = 5.0f;
+        float pulse = 0.8f + 0.2f * sinf(dot_pulse);
+        int dot_a = (int)(255 * dot_alpha * pulse);
+        float gap = 16.0f;
+        ImVec2 dot_center = center;
+        draw_list->AddCircleFilled(
+            ImVec2(dot_center.x - gap * 0.5f, dot_center.y),
+            dot_r, IM_COL32(255, 255, 255, dot_a), 16
+        );
+        draw_list->AddCircleFilled(
+            ImVec2(dot_center.x + gap * 0.5f, dot_center.y),
+            dot_r, IM_COL32(255, 255, 255, dot_a), 16
+        );
+    }
+
+    if (expand_t > 0.3f) {
+        // === 展开态：眼睛图标 + 文字 ===
+        float content_alpha = ImMin((expand_t - 0.3f) / 0.4f, 1.0f);
+        int text_a = (int)(255 * content_alpha);
+
+        // 眼睛图标
+        const char* eye_icon = is_expanded ? ICON_FA_EYE_SLASH"" : ICON_FA_EYE"";
+        ImVec2 icon_size = ImGui::CalcTextSize(eye_icon);
+        float icon_x = center.x - 60.0f;
+        float icon_y = center.y - icon_size.y * 0.5f;
+        draw_list->AddText(ImVec2(icon_x, icon_y), IM_COL32(0, 122, 255, text_a), eye_icon);
+
+        // 文字
+        const char* label = is_expanded ? "\xe7\x82\xb9\xe5\x87\xbb\xe5\xb1\x95\xe5\xbc\x80" : "\xe7\x82\xb9\xe5\x87\xbb\xe9\x9a\x90\xe8\x97\x8f"; // 点击展开 / 点击隐藏
+        ImVec2 label_size = ImGui::CalcTextSize(label);
+        float label_x = icon_x + icon_size.x + 8.0f;
+        float label_y = center.y - label_size.y * 0.5f;
+        draw_list->AddText(ImVec2(label_x, label_y), IM_COL32(255, 255, 255, text_a), label);
+    }
+}
+
+// ============================================================================
 // render_window（原版 MainUI.h 第1-270行，严格逐行移植）
 // ============================================================================
 void render_window() {

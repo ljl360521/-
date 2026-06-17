@@ -15,6 +15,10 @@
 #define ICON_FA_CROSSHAIRS "\xef\x81\x9b"
 #define ICON_FA_GEAR       "\xef\x80\x93"
 
+// 灵动岛图标（U+f06e / U+f070，在原版加载的 0xf000-0xf3ff 范围内）
+#define ICON_FA_EYE       "\xef\x81\xae"
+#define ICON_FA_EYE_SLASH "\xef\x81\xb0"
+
 namespace aura_ui {
 
 // LOGO 纹理（原版 extern ImTextureID LOGO）
@@ -25,6 +29,9 @@ void init();
 
 // 完整窗口渲染入口（原版 Draw_Meun -> MainUI.h）
 void render_window();
+
+// 灵动岛（窗口上方胶囊，点击切换窗口显示/隐藏，丝滑动画）
+void render_dynamic_island();
 
 // ---- 背景模糊窗口（原版 UpdateBlurWindow，OpenGL 后端空实现）----
 void UpdateBlurWindow(const ImVec2& pos, const ImVec2& size, float radius, bool enabled, int blurStrength = 255);
