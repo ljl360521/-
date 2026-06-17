@@ -912,10 +912,25 @@ bool HorizontalToggleBar(const char* label, int* current_item, const char* const
 // ============================================================================
 // render_dynamic_island - 灵动岛（窗口上方胶囊，点击切换窗口显示/隐藏）
 // ============================================================================
+// 灵动岛状态（文件内静态，供 render 和 bounds 查询共用）
+static bool g_island_expanded = false;       // 展开状态（窗口隐藏时展开）
+static float g_island_expand_t = 0.0f;       // 展开/收起动画进度 0~1
+static float g_island_cw = 240.0f;           // 当前宽度
+static float g_island_ch = 52.0f;            // 当前高度
+static float g_island_x = 0.0f;              // 当前左上角 x
+static float g_island_y = 0.0f;              // 当前左上角 y
+
+bool get_dynamic_island_bounds(float outBounds[4]) {
+    // 灵动岛始终可点击（即使窗口隐藏，灵动岛也要能点）
+    outBounds[0] = g_island_x;
+    outBounds[1] = g_island_y;
+    outBounds[2] = g_island_x + g_island_cw;
+    outBounds[3] = g_island_y + g_island_ch;
+    return true;
+}
+
 void render_dynamic_island() {
-    // 灵动岛状态
-    static bool is_expanded = false;       // 展开状态（窗口隐藏时展开）
-    static float expand_t = 0.0f;          // 展开/收起动画进度 0~1
+    // 局部动画状态（仅渲染用）
     static float hover_glow = 0.0f;        // 悬停光晕强度
     static float press_scale = 1.0f;       // 按压缩放
     static float dot_pulse = 0.0f;         // 收起态圆点呼吸
@@ -923,24 +938,24 @@ void render_dynamic_island() {
     const float dt = ImGui::GetIO().DeltaTime;
 
     // 展开/收起动画（丝滑 lerp）
-    float target_t = is_expanded ? 1.0f : 0.0f;
-    expand_t += (target_t - expand_t) * ImMin(dt * 10.0f, 1.0f);
+    float target_t = g_island_expanded ? 1.0f : 0.0f;
+    g_island_expand_t += (target_t - g_island_expand_t) * ImMin(dt * 10.0f, 1.0f);
 
     // 尺寸参数（调大）
     const float collapsed_w = 240.0f, collapsed_h = 52.0f;
     const float expanded_w = 360.0f, expanded_h = 84.0f;
-    float current_w = collapsed_w + (expanded_w - collapsed_w) * expand_t;
-    float current_h = collapsed_h + (expanded_h - collapsed_h) * expand_t;
-    const float rounding = current_h * 0.5f;
+    g_island_cw = collapsed_w + (expanded_w - collapsed_w) * g_island_expand_t;
+    g_island_ch = collapsed_h + (expanded_h - collapsed_h) * g_island_expand_t;
+    const float rounding = g_island_ch * 0.5f;
 
     // 定位：屏幕顶部居中，紧贴窗口上方（间距加大到 24px，更往上）
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    float island_x = (viewport->Pos.x + viewport->Size.x * 0.5f) - (current_w * 0.5f);
-    float island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - current_h - 24.0f;
+    g_island_x = (viewport->Pos.x + viewport->Size.x * 0.5f) - (g_island_cw * 0.5f);
+    g_island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - g_island_ch - 24.0f;
 
     // 点击区域
-    ImVec2 island_pos(island_x, island_y);
-    ImVec2 island_size(current_w, current_h);
+    ImVec2 island_pos(g_island_x, g_island_y);
+    ImVec2 island_size(g_island_cw, g_island_ch);
     ImRect island_bb(island_pos, island_pos + island_size);
 
     // === 用独立透明窗口包裹，避免 ImGui 自动创建 Debug 窗口 ===
@@ -966,8 +981,8 @@ void render_dynamic_island() {
 
         // 点击切换
         if (pressed) {
-            is_expanded = !is_expanded;
-            MainAuraOne = !is_expanded;  // 展开时隐藏窗口，收起时显示窗口
+            g_island_expanded = !g_island_expanded;
+            MainAuraOne = !g_island_expanded;  // 展开时隐藏窗口，收起时显示窗口
         }
     }
     ImGui::End();
@@ -990,7 +1005,7 @@ void render_dynamic_island() {
 
     // 计算缩放后的矩形（以中心缩放）
     ImVec2 center = island_bb.GetCenter();
-    ImVec2 scaled_half = ImVec2(current_w * press_scale * 0.5f, current_h * press_scale * 0.5f);
+    ImVec2 scaled_half = ImVec2(g_island_cw * press_scale * 0.5f, g_island_ch * press_scale * 0.5f);
     ImRect draw_bb(center - scaled_half, center + scaled_half);
 
     // 悬停蓝色光晕
@@ -1019,9 +1034,9 @@ void render_dynamic_island() {
     draw_list->AddRect(draw_bb.Min, draw_bb.Max, border_col, rounding, 0, 1.0f);
 
     // 内容绘制
-    if (expand_t < 0.5f) {
+    if (g_island_expand_t < 0.5f) {
         // === 收起态：两个小圆点 ===
-        float dot_alpha = 1.0f - expand_t * 2.0f;
+        float dot_alpha = 1.0f - g_island_expand_t * 2.0f;
         float dot_r = 6.0f;
         float pulse = 0.8f + 0.2f * sinf(dot_pulse);
         int dot_a = (int)(255 * dot_alpha * pulse);
@@ -1037,20 +1052,20 @@ void render_dynamic_island() {
         );
     }
 
-    if (expand_t > 0.3f) {
+    if (g_island_expand_t > 0.3f) {
         // === 展开态：眼睛图标 + 文字 ===
-        float content_alpha = ImMin((expand_t - 0.3f) / 0.4f, 1.0f);
+        float content_alpha = ImMin((g_island_expand_t - 0.3f) / 0.4f, 1.0f);
         int text_a = (int)(255 * content_alpha);
 
         // 眼睛图标
-        const char* eye_icon = is_expanded ? ICON_FA_EYE_SLASH"" : ICON_FA_EYE"";
+        const char* eye_icon = g_island_expanded ? ICON_FA_EYE_SLASH"" : ICON_FA_EYE"";
         ImVec2 icon_size = ImGui::CalcTextSize(eye_icon);
         float icon_x = center.x - 80.0f;
         float icon_y = center.y - icon_size.y * 0.5f;
         draw_list->AddText(ImVec2(icon_x, icon_y), IM_COL32(0, 122, 255, text_a), eye_icon);
 
         // 文字
-        const char* label = is_expanded ? "\xe7\x82\xb9\xe5\x87\xbb\xe5\xb1\x95\xe5\xbc\x80" : "\xe7\x82\xb9\xe5\x87\xbb\xe9\x9a\x90\xe8\x97\x8f"; // 点击展开 / 点击隐藏
+        const char* label = g_island_expanded ? "\xe7\x82\xb9\xe5\x87\xbb\xe5\xb1\x95\xe5\xbc\x80" : "\xe7\x82\xb9\xe5\x87\xbb\xe9\x9a\x90\xe8\x97\x8f"; // 点击展开 / 点击隐藏
         ImVec2 label_size = ImGui::CalcTextSize(label);
         float label_x = icon_x + icon_size.x + 10.0f;
         float label_y = center.y - label_size.y * 0.5f;

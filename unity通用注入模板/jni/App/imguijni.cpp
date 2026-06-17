@@ -58,13 +58,25 @@ static bool get_target_imgui_window_bounds(float outBounds[4]) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_example_imgui_ImGui_isImGuiComponentTouched(JNIEnv *env, jclass clazz, jfloat x, jfloat y) {
+    // 1. 检查主窗口 MainAuraNexusUI
     float windowBounds[4];
-    if (!get_target_imgui_window_bounds(windowBounds)) {
-        return JNI_FALSE;
+    if (get_target_imgui_window_bounds(windowBounds)) {
+        if (x >= windowBounds[0] && x <= windowBounds[2] &&
+            y >= windowBounds[1] && y <= windowBounds[3]) {
+            return JNI_TRUE;
+        }
     }
 
-    return (x >= windowBounds[0] && x <= windowBounds[2] &&
-            y >= windowBounds[1] && y <= windowBounds[3]) ? JNI_TRUE : JNI_FALSE;
+    // 2. 检查灵动岛（窗口隐藏时主窗口 bounds 查询会返回 false，但灵动岛仍要可点击）
+    float islandBounds[4];
+    if (aura_ui::get_dynamic_island_bounds(islandBounds)) {
+        if (x >= islandBounds[0] && x <= islandBounds[2] &&
+            y >= islandBounds[1] && y <= islandBounds[3]) {
+            return JNI_TRUE;
+        }
+    }
+
+    return JNI_FALSE;
 }
 
 

@@ -33,6 +33,10 @@ void render_window();
 // 灵动岛（窗口上方胶囊，点击切换窗口显示/隐藏，丝滑动画）
 void render_dynamic_island();
 
+// 查询灵动岛当前边界（屏幕坐标），用于触摸事件命中判断
+// 返回 true 表示灵动岛存在且可点击，outBounds[4] = {x1,y1,x2,y2}
+bool get_dynamic_island_bounds(float outBounds[4]);
+
 // ---- 背景模糊窗口（原版 UpdateBlurWindow，OpenGL 后端空实现）----
 void UpdateBlurWindow(const ImVec2& pos, const ImVec2& size, float radius, bool enabled, int blurStrength = 255);
 
