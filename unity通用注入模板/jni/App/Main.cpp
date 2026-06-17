@@ -70,7 +70,6 @@ bool check_and_create_init_flag() {
 JavaVM *g_JavaVM = nullptr;
 jobject g_ActivityInstance = nullptr;
 jobject g_MainLooperHandler = nullptr;
-jclass g_ImGuiClass = nullptr; // 保存 ImGui 类的全局引用，供监控线程使用
 
 static pthread_mutex_t g_InitMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -527,10 +526,6 @@ jclass loadImGuiClassFromDex() {
         
         LOGI("✓ ImGui类加载成功: %p", imguiClass);
         
-        // 保存全局引用，供监控线程使用
-        g_ImGuiClass = (jclass)env->NewGlobalRef(imguiClass);
-        LOGI("✓ 已保存 ImGui 类全局引用: %p", g_ImGuiClass);
-        
         env->DeleteLocalRef(classNameStr);
         env->DeleteLocalRef(libraryPath);
         env->DeleteLocalRef(optimizedDir);
@@ -780,77 +775,7 @@ void* native_thread_func(void *arg) {
     
     LOGI("========== ✓✓✓ ImGui视图初始化成功 ==========");
     LOGI("✓ ImGui已成功注入并初始化！");
-    LOGI("✓ 进入监控循环，检测 View 脱离/渲染停滞并自动重建");
-    
-    // ========================================================================
-    // 【关键修复】监控循环：检测 ImGui View 是否被 Unity 移除 或 渲染停滞
-    // Unity 应用切后台再切回时，可能：
-    //   1. 重建 ContentView 导致 GLES3JNIView 被移除（onDetachedFromWindow）
-    //   2. GLSurfaceView 渲染线程卡死，EGL Context 丢失后不恢复
-    // 此循环每秒调用 ImGui.rebuildViewIfNeeded()，Java 层会检测：
-    //   - display 为 null 或 detached → 重建
-    //   - frameCounter 连续 5 秒不增长（渲染停滞）→ 重建
-    // ========================================================================
-    JNIEnv *env = getJNIEnv();
-    if (!env || !g_ImGuiClass) {
-        LOGE("❌ 监控循环启动失败：无法获取 JNI 环境或 ImGui 类");
-        return nullptr;
-    }
-    
-    jmethodID rebuildMethod = env->GetStaticMethodID(
-        g_ImGuiClass, "rebuildViewIfNeeded", "()I"
-    );
-    if (!rebuildMethod) {
-        LOGE("❌ 找不到 rebuildViewIfNeeded 方法");
-        env->ExceptionClear();
-        return nullptr;
-    }
-    LOGI("✓ 找到 rebuildViewIfNeeded 方法，开始监控（间隔 1 秒）");
-    
-    // forceRebuild 方法：无条件强制重建（兜底）
-    jmethodID forceRebuildMethod = env->GetStaticMethodID(
-        g_ImGuiClass, "forceRebuild", "()I"
-    );
-    if (forceRebuildMethod) {
-        LOGI("✓ 找到 forceRebuild 方法");
-    } else {
-        env->ExceptionClear();
-        LOGW("⚠️  找不到 forceRebuild 方法（非致命）");
-    }
-    
-    int rebuildCount = 0;
-    int tick = 0;
-    while (true) {
-        sleep(1); // 每 1 秒检查一次
-        tick++;
-        
-        JNIEnv *loopEnv = getJNIEnv();
-        if (!loopEnv || !g_ImGuiClass) {
-            continue;
-        }
-        
-        // 检测式重建
-        jint result = loopEnv->CallStaticIntMethod(g_ImGuiClass, rebuildMethod);
-        if (loopEnv->ExceptionCheck()) {
-            loopEnv->ExceptionClear();
-            continue;
-        }
-        
-        if (result > 0) {
-            rebuildCount += result;
-            LOGI("🔄 [监控] 检测式重建触发 (累计 %d 次)", rebuildCount);
-        }
-        
-        // 兜底：每 15 秒无条件强制重建一次，确保即使检测逻辑失效也能恢复
-        if (forceRebuildMethod && (tick % 15) == 0) {
-            LOGI("🔄 [监控] 定时强制重建 (tick=%d)", tick);
-            loopEnv->CallStaticIntMethod(g_ImGuiClass, forceRebuildMethod);
-            if (loopEnv->ExceptionCheck()) {
-                loopEnv->ExceptionClear();
-            }
-            rebuildCount++;
-        }
-    }
+    LOGI("✓ 所有操作完成！\n");
     
     return nullptr;
 }
