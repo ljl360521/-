@@ -926,34 +926,53 @@ void render_dynamic_island() {
     float target_t = is_expanded ? 1.0f : 0.0f;
     expand_t += (target_t - expand_t) * ImMin(dt * 10.0f, 1.0f);
 
-    // 尺寸参数
-    const float collapsed_w = 180.0f, collapsed_h = 37.0f;
-    const float expanded_w = 280.0f, expanded_h = 64.0f;
+    // 尺寸参数（调大）
+    const float collapsed_w = 240.0f, collapsed_h = 52.0f;
+    const float expanded_w = 360.0f, expanded_h = 84.0f;
     float current_w = collapsed_w + (expanded_w - collapsed_w) * expand_t;
     float current_h = collapsed_h + (expanded_h - collapsed_h) * expand_t;
     const float rounding = current_h * 0.5f;
 
-    // 定位：屏幕顶部居中，紧贴窗口上方
+    // 定位：屏幕顶部居中，紧贴窗口上方（间距加大到 24px，更往上）
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     float island_x = (viewport->Pos.x + viewport->Size.x * 0.5f) - (current_w * 0.5f);
-    float island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - current_h - 8.0f;
+    float island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - current_h - 24.0f;
 
     // 点击区域
     ImVec2 island_pos(island_x, island_y);
     ImVec2 island_size(current_w, current_h);
     ImRect island_bb(island_pos, island_pos + island_size);
 
-    ImGui::SetCursorScreenPos(island_pos);
-    ImGui::InvisibleButton("##DynamicIsland", island_size);
-    bool hovered = ImGui::IsItemHovered();
-    bool pressed = ImGui::IsItemActivated() && ImGui::IsItemHovered();
-    bool held = ImGui::IsItemActive();
+    // === 用独立透明窗口包裹，避免 ImGui 自动创建 Debug 窗口 ===
+    ImGui::SetNextWindowPos(island_pos);
+    ImGui::SetNextWindowSize(island_size);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGuiWindowFlags island_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBackground;
+    bool open = ImGui::Begin("##DynamicIslandWin", nullptr, island_flags);
 
-    // 点击切换
-    if (pressed) {
-        is_expanded = !is_expanded;
-        MainAuraOne = !is_expanded;  // 展开时隐藏窗口，收起时显示窗口
+    bool hovered = false, pressed = false, held = false;
+    if (open) {
+        ImGui::SetCursorScreenPos(island_pos);
+        ImGui::InvisibleButton("##DynamicIsland", island_size);
+        hovered = ImGui::IsItemHovered();
+        pressed = ImGui::IsItemClicked();
+        held = ImGui::IsItemActive();
+
+        // 点击切换
+        if (pressed) {
+            is_expanded = !is_expanded;
+            MainAuraOne = !is_expanded;  // 展开时隐藏窗口，收起时显示窗口
+        }
     }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
 
     // 悬停光晕动画
     float target_glow = hovered ? 1.0f : 0.0f;
@@ -966,7 +985,7 @@ void render_dynamic_island() {
     // 圆点呼吸
     dot_pulse += dt * 3.0f;
 
-    // 绘制
+    // === 绘制（用 ForegroundDrawList，确保在最上层）===
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
 
     // 计算缩放后的矩形（以中心缩放）
@@ -977,8 +996,8 @@ void render_dynamic_island() {
     // 悬停蓝色光晕
     if (hover_glow > 0.01f) {
         for (int i = 3; i >= 1; i--) {
-            float glow_r = i * 6.0f * hover_glow;
-            int alpha = (int)(12.0f * hover_glow * (4 - i));
+            float glow_r = i * 7.0f * hover_glow;
+            int alpha = (int)(14.0f * hover_glow * (4 - i));
             draw_list->AddRect(
                 ImVec2(draw_bb.Min.x - glow_r, draw_bb.Min.y - glow_r),
                 ImVec2(draw_bb.Max.x + glow_r, draw_bb.Max.y + glow_r),
@@ -994,7 +1013,6 @@ void render_dynamic_island() {
     // 边框微光
     ImU32 border_col = IM_COL32(60, 60, 60, 80);
     if (hover_glow > 0.01f) {
-        int b = (int)(60 + 100 * hover_glow);
         int a = (int)(80 + 120 * hover_glow);
         border_col = IM_COL32(0, 122, 255, a);
     }
@@ -1004,10 +1022,10 @@ void render_dynamic_island() {
     if (expand_t < 0.5f) {
         // === 收起态：两个小圆点 ===
         float dot_alpha = 1.0f - expand_t * 2.0f;
-        float dot_r = 5.0f;
+        float dot_r = 6.0f;
         float pulse = 0.8f + 0.2f * sinf(dot_pulse);
         int dot_a = (int)(255 * dot_alpha * pulse);
-        float gap = 16.0f;
+        float gap = 20.0f;
         ImVec2 dot_center = center;
         draw_list->AddCircleFilled(
             ImVec2(dot_center.x - gap * 0.5f, dot_center.y),
@@ -1027,14 +1045,14 @@ void render_dynamic_island() {
         // 眼睛图标
         const char* eye_icon = is_expanded ? ICON_FA_EYE_SLASH"" : ICON_FA_EYE"";
         ImVec2 icon_size = ImGui::CalcTextSize(eye_icon);
-        float icon_x = center.x - 60.0f;
+        float icon_x = center.x - 80.0f;
         float icon_y = center.y - icon_size.y * 0.5f;
         draw_list->AddText(ImVec2(icon_x, icon_y), IM_COL32(0, 122, 255, text_a), eye_icon);
 
         // 文字
         const char* label = is_expanded ? "\xe7\x82\xb9\xe5\x87\xbb\xe5\xb1\x95\xe5\xbc\x80" : "\xe7\x82\xb9\xe5\x87\xbb\xe9\x9a\x90\xe8\x97\x8f"; // 点击展开 / 点击隐藏
         ImVec2 label_size = ImGui::CalcTextSize(label);
-        float label_x = icon_x + icon_size.x + 8.0f;
+        float label_x = icon_x + icon_size.x + 10.0f;
         float label_y = center.y - label_size.y * 0.5f;
         draw_list->AddText(ImVec2(label_x, label_y), IM_COL32(255, 255, 255, text_a), label);
     }
