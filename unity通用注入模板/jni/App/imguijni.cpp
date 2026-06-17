@@ -7,6 +7,7 @@
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
 #include "zt_ttf.h"
+#include "md3_ui.hpp"
 #include <string>
 #include <vector>
 #include <cstring>
@@ -120,6 +121,9 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     style.FrameRounding = 2.3f;
     style.ScrollbarRounding = 0;
 
+    // 初始化 MD3 UI（应用 MD3 配色和样式）
+    md3_ui::init();
+
     g_Initialized = true;
 }
 
@@ -147,8 +151,29 @@ void DrawFloatingWindow() {
     ImGui::SetNextWindowSizeConstraints(minSize, ImVec2(FLT_MAX, FLT_MAX));
 
     ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::Begin("悬浮窗口", nullptr, windowFlags)) {
+    if (ImGui::Begin("可一定", nullptr, windowFlags)) {
         g_window = ImGui::GetCurrentWindow();
+
+        // 标签页
+        if (ImGui::BeginTabBar("##main_tabs", ImGuiTabBarFlags_None)) {
+            // 首页标签页
+            if (ImGui::BeginTabItem("首页")) {
+                ImGui::TextUnformatted("欢迎使用可一定");
+                ImGui::Separator();
+                ImGui::TextUnformatted("这是一个 Unity 通用注入模板");
+                ImGui::Text("屏幕尺寸: %d x %d", screenWidth, screenHeight);
+                ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+                ImGui::EndTabItem();
+            }
+
+            // MD3 动画标签页
+            if (ImGui::BeginTabItem("md3动画")) {
+                md3_ui::render_md3_tab();
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
     }
     ImGui::End();
 }
