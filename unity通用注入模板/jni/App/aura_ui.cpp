@@ -919,13 +919,24 @@ static float g_island_cw = 240.0f;           // 当前宽度
 static float g_island_ch = 52.0f;            // 当前高度
 static float g_island_x = 0.0f;              // 当前左上角 x
 static float g_island_y = 0.0f;              // 当前左上角 y
+static bool g_island_first_render = false;   // 是否已渲染过至少一帧
 
 bool get_dynamic_island_bounds(float outBounds[4]) {
-    // 灵动岛始终可点击（即使窗口隐藏，灵动岛也要能点）
-    outBounds[0] = g_island_x;
-    outBounds[1] = g_island_y;
-    outBounds[2] = g_island_x + g_island_cw;
-    outBounds[3] = g_island_y + g_island_ch;
+    // 如果还没渲染过，返回全屏区域（确保第一帧前触摸也能传进来）
+    if (!g_island_first_render) {
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        outBounds[0] = vp ? vp->Pos.x : 0;
+        outBounds[1] = vp ? vp->Pos.y : 0;
+        outBounds[2] = vp ? (vp->Pos.x + vp->Size.x) : 9999;
+        outBounds[3] = vp ? (vp->Pos.y + 200) : 200;  // 屏幕上方 200px 区域
+        return true;
+    }
+    // 正常返回灵动岛边界，并扩大 30px 容错范围（手指触摸精度问题）
+    float tol = 30.0f;
+    outBounds[0] = g_island_x - tol;
+    outBounds[1] = g_island_y - tol;
+    outBounds[2] = g_island_x + g_island_cw + tol;
+    outBounds[3] = g_island_y + g_island_ch + tol;
     return true;
 }
 
@@ -935,7 +946,8 @@ void render_dynamic_island() {
     static float press_scale = 1.0f;       // 按压缩放
     static float dot_pulse = 0.0f;         // 收起态圆点呼吸
 
-    const float dt = ImGui::GetIO().DeltaTime;
+    ImGuiIO& io = ImGui::GetIO();
+    const float dt = io.DeltaTime;
 
     // 展开/收起动画（丝滑 lerp）
     float target_t = g_island_expanded ? 1.0f : 0.0f;
@@ -953,54 +965,38 @@ void render_dynamic_island() {
     g_island_x = (viewport->Pos.x + viewport->Size.x * 0.5f) - (g_island_cw * 0.5f);
     g_island_y = (viewport->Pos.y + viewport->Size.y * 0.5f) - 400.0f - g_island_ch - 24.0f;
 
-    // 点击区域
+    // 灵动岛区域
     ImVec2 island_pos(g_island_x, g_island_y);
     ImVec2 island_size(g_island_cw, g_island_ch);
     ImRect island_bb(island_pos, island_pos + island_size);
 
-    // === 用独立透明窗口包裹，避免 ImGui 自动创建 Debug 窗口 ===
-    ImGui::SetNextWindowPos(island_pos);
-    ImGui::SetNextWindowSize(island_size);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGuiWindowFlags island_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoBackground;
-    bool open = ImGui::Begin("##DynamicIslandWin", nullptr, island_flags);
+    // === 手动 hit-test（不依赖 InvisibleButton 和窗口系统）===
+    // 直接用 io.MousePos 和 IsMouseClicked(0)，和主窗口按钮用同一套鼠标状态
+    ImVec2 mouse = io.MousePos;
+    bool hovered = (mouse.x >= island_bb.Min.x && mouse.x <= island_bb.Max.x &&
+                    mouse.y >= island_bb.Min.y && mouse.y <= island_bb.Max.y);
 
-    bool hovered = false, pressed = false, held = false;
-    if (open) {
-        ImGui::SetCursorScreenPos(island_pos);
-        ImGui::InvisibleButton("##DynamicIsland", island_size);
-        hovered = ImGui::IsItemHovered();
-        pressed = ImGui::IsItemClicked();
-        held = ImGui::IsItemActive();
+    // 检测点击：IsMouseClicked(0) 是全局的，只要 io.MouseDown[0] 被设置就能检测到
+    bool clicked = hovered && ImGui::IsMouseClicked(0);
 
-        // 点击切换
-        if (pressed) {
-            g_island_expanded = !g_island_expanded;
-            MainAuraOne = !g_island_expanded;  // 展开时隐藏窗口，收起时显示窗口
-        }
+    if (clicked) {
+        g_island_expanded = !g_island_expanded;
+        MainAuraOne = !g_island_expanded;  // 展开时隐藏窗口，收起时显示窗口
     }
-    ImGui::End();
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor();
 
     // 悬停光晕动画
     float target_glow = hovered ? 1.0f : 0.0f;
     hover_glow += (target_glow - hover_glow) * ImMin(dt * 12.0f, 1.0f);
 
     // 按压缩放动画
-    float target_scale = (held && hovered) ? 0.93f : 1.0f;
+    bool mouse_down = io.MouseDown[0];
+    float target_scale = (hovered && mouse_down) ? 0.93f : 1.0f;
     press_scale += (target_scale - press_scale) * ImMin(dt * 18.0f, 1.0f);
 
     // 圆点呼吸
     dot_pulse += dt * 3.0f;
 
-    // === 绘制（用 ForegroundDrawList，确保在最上层）===
+    // === 绘制（用 ForegroundDrawList，确保在最上层，不需要窗口）===
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
 
     // 计算缩放后的矩形（以中心缩放）
@@ -1071,6 +1067,8 @@ void render_dynamic_island() {
         float label_y = center.y - label_size.y * 0.5f;
         draw_list->AddText(ImVec2(label_x, label_y), IM_COL32(255, 255, 255, text_a), label);
     }
+
+    g_island_first_render = true;
 }
 
 // ============================================================================
