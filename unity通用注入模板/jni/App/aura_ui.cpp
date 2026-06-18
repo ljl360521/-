@@ -945,6 +945,8 @@ void render_dynamic_island() {
     static float hover_glow = 0.0f;        // 悬停光晕强度
     static float press_scale = 1.0f;       // 按压缩放
     static float dot_pulse = 0.0f;         // 收起态圆点呼吸
+    // 跨帧点击状态机（模拟 ImGui Button 行为，不依赖 IsMouseClicked 单帧检测）
+    static bool island_pressed = false;    // 鼠标按下时是否在灵动岛上
 
     ImGuiIO& io = ImGui::GetIO();
     const float dt = io.DeltaTime;
@@ -971,26 +973,37 @@ void render_dynamic_island() {
     ImRect island_bb(island_pos, island_pos + island_size);
 
     // === 手动 hit-test（不依赖 InvisibleButton 和窗口系统）===
-    // 直接用 io.MousePos 和 IsMouseClicked(0)，和主窗口按钮用同一套鼠标状态
     ImVec2 mouse = io.MousePos;
     bool hovered = (mouse.x >= island_bb.Min.x && mouse.x <= island_bb.Max.x &&
                     mouse.y >= island_bb.Min.y && mouse.y <= island_bb.Max.y);
 
-    // 检测点击：IsMouseClicked(0) 是全局的，只要 io.MouseDown[0] 被设置就能检测到
-    bool clicked = hovered && ImGui::IsMouseClicked(0);
+    // === 跨帧点击状态机（模拟 ImGui ButtonBehavior）===
+    // 不用 IsMouseClicked(0)，因为它只在 NewFrame 检测到 MouseDown 变化的那一帧为 true，
+    // 如果 MotionEventClick 在 NewFrame 之后调用（Java UI 线程 vs GL 线程并发），
+    // IsMouseClicked 会错过点击。改用 io.MouseDown[0] 的当前状态 + 跨帧状态机。
+    bool mouse_down = io.MouseDown[0];
 
-    if (clicked) {
-        g_island_expanded = !g_island_expanded;
-        MainAuraOne = !g_island_expanded;  // 展开时隐藏窗口，收起时显示窗口
+    // 检测按下：鼠标按下且在灵动岛上且之前未按下
+    if (mouse_down && hovered && !island_pressed) {
+        island_pressed = true;
     }
+    // 检测释放：鼠标释放且之前按下了
+    if (!mouse_down && island_pressed) {
+        island_pressed = false;
+        // 释放时仍在灵动岛上 → 触发点击
+        if (hovered) {
+            g_island_expanded = !g_island_expanded;
+            MainAuraOne = !g_island_expanded;  // 展开时隐藏窗口，收起时显示窗口
+        }
+    }
+    // 如果按下后鼠标移出灵动岛再释放，不触发点击（island_pressed 已重置）
 
     // 悬停光晕动画
     float target_glow = hovered ? 1.0f : 0.0f;
     hover_glow += (target_glow - hover_glow) * ImMin(dt * 12.0f, 1.0f);
 
     // 按压缩放动画
-    bool mouse_down = io.MouseDown[0];
-    float target_scale = (hovered && mouse_down) ? 0.93f : 1.0f;
+    float target_scale = (island_pressed && hovered) ? 0.93f : 1.0f;
     press_scale += (target_scale - press_scale) * ImMin(dt * 18.0f, 1.0f);
 
     // 圆点呼吸
