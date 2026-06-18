@@ -1142,8 +1142,8 @@ void render_window() {
     }
 
     // === 窗口样式（MainUI.h 第40-53行）===
-    // 窗口背景用 window_opacity 控制（白色半透明，配合高斯模糊背景）
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.0f, 1.0f, 1.0f, window_opacity));
+    // 窗口背景：黑色，透明度由 window_opacity 控制
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, window_opacity));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 40.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1154,7 +1154,8 @@ void render_window() {
     ImVec2 window_size = ImVec2(current_width, 800.0f);
     ImGui::SetNextWindowPos(window_pos);
     ImGui::SetNextWindowSize(ImVec2(current_width, 800.0f));
-    UpdateBlurWindow(window_pos, window_size, 40.0f, true, (int)(模糊强度 * 255.0f));
+    // 用户要求去掉模糊，背景改成黑色，所以禁用模糊窗口
+    UpdateBlurWindow(window_pos, window_size, 40.0f, false, 0);
     float content_alpha = fminf(1.0f, (width_factor - 0.2f) / 0.6f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, content_alpha);
     if (ImGui::Begin("MainAuraNexusUI", nullptr, mainWindowFlags)) {
