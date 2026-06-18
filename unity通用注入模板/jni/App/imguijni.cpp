@@ -87,10 +87,36 @@ Java_com_example_imgui_ImGui_nativeGetImGuiWindowBounds(JNIEnv *env, jclass claz
     jfloatArray bounds = env->NewFloatArray(4);
     if (bounds == nullptr) return nullptr;
 
-    float windowBounds[4];
-    get_target_imgui_window_bounds(windowBounds);
-    env->SetFloatArrayRegion(bounds, 0, 4, windowBounds);
+    float result[4] = {0, 0, 0, 0};
+    bool hasWindow = get_target_imgui_window_bounds(result);
 
+    // 灵动岛边界（直接用 GetMainViewport 计算，避免跨线程读取 g_island_x/y 的可见性问题）
+    // 用最大范围（展开态 360x84）+ 30px 容错，确保手指能命中
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (vp) {
+        float cx = vp->Pos.x + vp->Size.x * 0.5f;
+        float cy = vp->Pos.y + vp->Size.y * 0.5f;
+        float island_x1 = cx - 180.0f - 30.0f;
+        float island_y1 = cy - 400.0f - 84.0f - 24.0f - 30.0f;
+        float island_x2 = cx + 180.0f + 30.0f;
+        float island_y2 = cy - 400.0f - 24.0f + 30.0f;
+
+        if (hasWindow) {
+            // 合并主窗口和灵动岛区域
+            result[0] = fminf(result[0], island_x1);
+            result[1] = fminf(result[1], island_y1);
+            result[2] = fmaxf(result[2], island_x2);
+            result[3] = fmaxf(result[3], island_y2);
+        } else {
+            // 窗口隐藏时只返回灵动岛区域，确保灵动岛仍可点击
+            result[0] = island_x1;
+            result[1] = island_y1;
+            result[2] = island_x2;
+            result[3] = island_y2;
+        }
+    }
+
+    env->SetFloatArrayRegion(bounds, 0, 4, result);
     return bounds;
 }
 
