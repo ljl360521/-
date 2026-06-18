@@ -9,6 +9,8 @@
 #include "stb_image.h"
 #include "aura_ui.hpp"
 #include "LOGO.h"
+#include "blur_capture.hpp"
+#include "blur_renderer.hpp"
 
 #include <GLES3/gl3.h>
 #include <cstdio>
@@ -91,7 +93,7 @@ void lb_thirdperson_thread_func() {}
 void lb_neitou_thread_func() {}
 
 // ============================================================================
-// init - 加载 LOGO 纹理（原版 LoadImages）
+// init - 加载 LOGO 纹理（原版 LoadImages）+ 初始化高斯模糊
 // ============================================================================
 void init() {
     if (g_logo_texture) return;
@@ -105,14 +107,23 @@ void init() {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
     stbi_image_free(data);
     LOGO = (ImTextureID)(intptr_t)g_logo_texture;
+
+    // 初始化高斯模糊模块
+    // blur_capture: Hook eglSwapBuffers 截取目标 App 帧缓冲（在独立线程，异步安装）
+    blur_capture::init();
+    // blur_renderer: 创建模糊 shader 和 FBO（在当前 ImGui GL 上下文）
+    blur_renderer::init();
 }
 
 // ============================================================================
-// UpdateBlurWindow - 空实现
-// 原版用 Vulkan + SurfaceControl 背景模糊，OpenGL 后端无法实现
+// UpdateBlurWindow - 真正的高斯模糊背景
+// 从 blur_capture 获取目标 App 帧缓冲，经 blur_renderer 双 Pass 高斯模糊后
+// 渲染为圆角矩形背景
 // ============================================================================
 void UpdateBlurWindow(const ImVec2& pos, const ImVec2& size, float radius, bool enabled, int blurStrength) {
-    (void)pos; (void)size; (void)radius; (void)enabled; (void)blurStrength;
+    // blurStrength: 0-255，映射到模糊半径 4-20
+    float blur_radius = 4.0f + (blurStrength / 255.0f) * 16.0f;
+    blur_renderer::render(pos, size, radius, blur_radius, enabled);
 }
 
 // ============================================================================
@@ -1042,15 +1053,21 @@ void render_dynamic_island() {
     }
     draw_list->AddRect(draw_bb.Min, draw_bb.Max, border_col, rounding, 0, 1.0f);
 
-    // 内容绘制
-    if (g_island_expand_t < 0.5f) {
-        // === 收起态：两个小圆点 ===
-        float dot_alpha = 1.0f - g_island_expand_t * 2.0f;
-        float dot_r = 6.0f;
-        float pulse = 0.8f + 0.2f * sinf(dot_pulse);
-        int dot_a = (int)(255 * dot_alpha * pulse);
-        float gap = 20.0f;
-        ImVec2 dot_center = center;
+    // 内容绘制（丝滑动画，无文字提示）
+    // 收起态：两个呼吸圆点
+    // 展开态：圆点拉长为胶囊条（无文字，纯动画）
+    float dot_alpha = 1.0f;
+    float dot_r = 6.0f;
+    float pulse = 0.8f + 0.2f * sinf(dot_pulse);
+    int dot_a = (int)(255 * dot_alpha * pulse);
+    float gap = 20.0f;
+    ImVec2 dot_center = center;
+
+    // 收起态（expand_t < 0.5）：两个小圆点
+    // 展开态（expand_t >= 0.5）：圆点逐渐拉长融合为一条胶囊
+    float expand_blend = g_island_expand_t; // 0~1
+    if (expand_blend < 0.5f) {
+        // 两个圆点
         draw_list->AddCircleFilled(
             ImVec2(dot_center.x - gap * 0.5f, dot_center.y),
             dot_r, IM_COL32(255, 255, 255, dot_a), 16
@@ -1059,26 +1076,18 @@ void render_dynamic_island() {
             ImVec2(dot_center.x + gap * 0.5f, dot_center.y),
             dot_r, IM_COL32(255, 255, 255, dot_a), 16
         );
-    }
-
-    if (g_island_expand_t > 0.3f) {
-        // === 展开态：眼睛图标 + 文字 ===
-        float content_alpha = ImMin((g_island_expand_t - 0.3f) / 0.4f, 1.0f);
-        int text_a = (int)(255 * content_alpha);
-
-        // 眼睛图标
-        const char* eye_icon = g_island_expanded ? ICON_FA_EYE_SLASH"" : ICON_FA_EYE"";
-        ImVec2 icon_size = ImGui::CalcTextSize(eye_icon);
-        float icon_x = center.x - 80.0f;
-        float icon_y = center.y - icon_size.y * 0.5f;
-        draw_list->AddText(ImVec2(icon_x, icon_y), IM_COL32(0, 122, 255, text_a), eye_icon);
-
-        // 文字
-        const char* label = g_island_expanded ? "\xe7\x82\xb9\xe5\x87\xbb\xe5\xb1\x95\xe5\xbc\x80" : "\xe7\x82\xb9\xe5\x87\xbb\xe9\x9a\x90\xe8\x97\x8f"; // 点击展开 / 点击隐藏
-        ImVec2 label_size = ImGui::CalcTextSize(label);
-        float label_x = icon_x + icon_size.x + 10.0f;
-        float label_y = center.y - label_size.y * 0.5f;
-        draw_list->AddText(ImVec2(label_x, label_y), IM_COL32(255, 255, 255, text_a), label);
+    } else {
+        // 圆点融合为胶囊条（宽度随展开度增加）
+        float bar_blend = (expand_blend - 0.5f) / 0.5f; // 0~1
+        float bar_half_w = gap * 0.5f + bar_blend * 40.0f; // 拉长
+        float bar_h = dot_r * 2.0f * (1.0f - bar_blend * 0.3f); // 略微变细
+        // 圆角胶囊
+        draw_list->AddRectFilled(
+            ImVec2(dot_center.x - bar_half_w, dot_center.y - bar_h * 0.5f),
+            ImVec2(dot_center.x + bar_half_w, dot_center.y + bar_h * 0.5f),
+            IM_COL32(255, 255, 255, dot_a),
+            bar_h * 0.5f, ImDrawFlags_RoundCornersAll
+        );
     }
 
     g_island_first_render = true;
