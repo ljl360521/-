@@ -41,6 +41,7 @@ int background_mode = 0;
 float ImGuiDrawESP = 0.7f;
 float ImGuiDrawESP2 = 0.7f;
 int Prevent = 0;
+float window_opacity = 0.85f;  // 窗口透明度（0=全透明, 1=不透明）
 
 // ============================================================================
 // 游戏功能 stub（原版 MainDefinition.h 第889行起 + gjc.h）
@@ -1141,7 +1142,8 @@ void render_window() {
     }
 
     // === 窗口样式（MainUI.h 第40-53行）===
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.0f, 1.0f, 1.0f, 0.0f));
+    // 窗口背景用 window_opacity 控制（白色半透明，配合高斯模糊背景）
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.0f, 1.0f, 1.0f, window_opacity));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 40.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1152,7 +1154,7 @@ void render_window() {
     ImVec2 window_size = ImVec2(current_width, 800.0f);
     ImGui::SetNextWindowPos(window_pos);
     ImGui::SetNextWindowSize(ImVec2(current_width, 800.0f));
-    UpdateBlurWindow(window_pos, window_size, 40.0f, true, 255);
+    UpdateBlurWindow(window_pos, window_size, 40.0f, true, (int)(模糊强度 * 255.0f));
     float content_alpha = fminf(1.0f, (width_factor - 0.2f) / 0.6f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, content_alpha);
     if (ImGui::Begin("MainAuraNexusUI", nullptr, mainWindowFlags)) {
@@ -1347,6 +1349,8 @@ void render_window() {
                     DrawAuraSectionTitle("\xe6\x98\xbe\xe7\xa4\xba\xe8\xae\xbe\xe7\xbd\xae"); // 显示设置
                     ImGui::Spacing();
                     ImGui::SliderFloat("\xe5\xb8\xa7\xe7\x8e\x87", &FPSControlSize, 0.0f, 165.0f, "%.0f"); // 帧率
+                    ImGui::Separator();
+                    ImGui::SliderFloat("\xe7\xaa\x97\xe5\x8f\xa3\xe9\x80\x8f\xe6\x98\x8e\xe5\xba\xa6", &window_opacity, 0.0f, 1.0f, "%.2f"); // 窗口透明度
                     ImGui::Separator();
                     ImGui::SliderFloat("\xe6\xa8\xa1\xe7\xb3\x8a\xe5\xbc\xba\xe5\xba\xa6", &模糊强度, 0, 1, "%.1f"); // 模糊强度
                     ImGui::Separator();
