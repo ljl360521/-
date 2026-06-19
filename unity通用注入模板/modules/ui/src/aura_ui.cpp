@@ -50,12 +50,34 @@ float window_opacity = 0.85f;  // 窗口透明度（0=全透明, 1=不透明）
 // 绘制球体功能（移植自球球大作战 DrawView.java + CustomLayout.java）
 // 坐标转换公式: screenX = ((entity.x - offsetX) * 23.25f * 比例 * (23.25f * 比例 / 视图比例)) + startX
 // ============================================================================
+
+// 球体数据结构（对应 CustomLayout.java 第1354行 addCircle 类）
+struct SphereEntity {
+    float x;        // 世界坐标 X (readFloat(coordAddr + 0x80))
+    float y;        // 世界坐标 Y (200 - readFloat(coordAddr + 0x84))
+    float radius;   // 球体半径 (readFloat(playerBaseAddr + 0x28))
+    int rankId;     // 组ID
+};
+
+#define MAX_SPHERES 64
+
 static bool g_draw_sphere_enabled = false;       // 绘制球体开关
-static bool g_draw_sphere_circle = true;         // 绘制圆球
+static bool g_draw_sphere_line = true;           // 绘制连线（drawView.addLine）
+static bool g_draw_sphere_circle = true;         // 绘制圆球（drawView.addCircle）
 static float g_sphere_scale = 1.0f;              // 比例（parameters.比例）
 static float g_sphere_view_scale = 23.25f;       // 视图比例（memory.readFloat(a3 - 0x38)）
-static float g_sphere_radius = 10.0f;            // 球体基础半径（对应 readFloat(playerBaseAddr + 0x28)）
+static float g_sphere_offset_x = 0.0f;           // 视图偏移X（memory.readFloat(a3 - 100)）
+static float g_sphere_offset_y = 100.0f;         // 视图偏移Y（200 - memory.readFloat(a3 - 96)）
 static int g_sphere_color = 0;                   // 球体颜色 (0=白 1=黄 2=橙 3=红)
+
+// 球体列表（对应 rankToPlayers，真实环境下从内存读取填充）
+// 真实环境: CustomLayout.java 第1451行 获取玩家结构体()
+//   玩家结构体指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
+//   半径: readFloat(playerBaseAddr + 0x28)
+//   坐标: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
+//         x = readFloat(coordAddr + 0x80), y = 200 - readFloat(coordAddr + 0x84)
+static SphereEntity g_sphere_list[MAX_SPHERES];  // 球体数组
+static int g_sphere_count = 0;                   // 球体数量
 
 // ============================================================================
 // 游戏功能 stub（原版 MainDefinition.h 第889行起 + gjc.h）
@@ -1231,9 +1253,15 @@ void render_dynamic_island() {
 
 // ============================================================================
 // DrawSpheres - 绘制球体（移植自球球大作战 DrawView.java + CustomLayout.java）
-// 使用 ImGui BackgroundDrawList 在游戏画面上层绘制球体圆圈
-// 坐标转换公式来源: CustomLayout.java 第1662-1672行 绘制玩家线段()
-//   drawRadius = entity.radius * 23.25f * 比例 * (23.25f * 比例 / 视图比例)
+// 使用 ImGui BackgroundDrawList 在游戏画面上层绘制所有球体
+// 逻辑来源: CustomLayout.java 第1634-1700行 绘制玩家线段()
+//   遍历 rankToPlayers 中所有球体，对每个球体：
+//     1. 世界坐标 -> 屏幕坐标
+//        screenX = ((entity.x - offsetX) * 23.25 * 比例 * (23.25 * 比例 / 视图比例)) + startX
+//        screenY = ((entity.y - offsetY) * 23.25 * 比例 * (23.25 * 比例 / 视图比例)) + startY
+//     2. drawRadius = entity.radius * 23.25 * 比例 * (23.25 * 比例 / 视图比例)
+//     3. drawView.addLine(startX, startY, screenX, screenY, ...)  // 中心到球体的连线
+//     4. drawView.addCircle(screenX, screenY, drawRadius, ...)    // 球体圆圈
 // ============================================================================
 
 static void DrawSpheres() {
@@ -1242,42 +1270,101 @@ static void DrawSpheres() {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    // 屏幕中心 = 我方球体位置（绿点位置，用户确认准确）
+    // 屏幕中心 = 我方球体位置（对应 parameters.分辨率x/2, 分辨率y/2）
     float startX = io.DisplaySize.x * 0.5f;
     float startY = io.DisplaySize.y * 0.5f;
 
+    // 视图偏移（对应 CustomLayout.java 第1652-1653行）
+    // offsetX = memory.readFloat(a3 - 100)
+    // offsetY = 200 - memory.readFloat(a3 - 96)
+    float offsetX = g_sphere_offset_x;
+    float offsetY = g_sphere_offset_y;
+
     // 坐标转换系数（对应 CustomLayout.java 第1662-1672行）
-    // drawRadius = radius * 23.25 * 比例 * (23.25 * 比例 / 视图比例)
+    // k = 23.25 * 比例
+    // view_k = k * (k / 视图比例) = 23.25 * 比例 * (23.25 * 比例 / 视图比例)
     float k = 23.25f * g_sphere_scale;
     float view_k = k * (k / g_sphere_view_scale);
 
     // 颜色表（对应 CustomLayout.java 中的 Color.parseColor）
     ImU32 colors[] = {
-        IM_COL32(255, 255, 255, 255),  // #FFFFFF 白
-        IM_COL32(255, 255, 51, 255),   // #FFFF33 黄
-        IM_COL32(255, 160, 122, 255),  // #FFA07A 橙
-        IM_COL32(255, 69, 0, 255),     // #FF4500 红
+        IM_COL32(255, 255, 255, 255),  // #FFFFFF 白（普通球体）
+        IM_COL32(255, 255, 51, 255),   // #FFFF33 黄（选中球体）
+        IM_COL32(255, 160, 122, 255),  // #FFA07A 橙（旋转卡点）
+        IM_COL32(255, 69, 0, 255),     // #FF4500 红（蛇手卡点）
     };
     ImU32 sphere_color = colors[g_sphere_color & 3];
 
-    // 球体半径（像素）= 真实半径 * view_k
-    // 真实环境下从 memory.readFloat(playerBaseAddr + 0x28) 读取
-    // 这里使用 g_sphere_radius 作为基础半径（用户可调）
-    float drawRadius = g_sphere_radius * view_k;
-    if (drawRadius < 5.0f) drawRadius = 5.0f;
-    if (drawRadius > 500.0f) drawRadius = 500.0f;
-
-    // 绘制球体圆圈（对应 drawView.addCircle，Style=STROKE）
-    // 以绿点（球体中心）为圆心画一个圆圈代表球体边界
-    if (g_draw_sphere_circle) {
-        bg->AddCircle(
-            ImVec2(startX, startY),
-            drawRadius,
-            sphere_color, 64, 3.0f
-        );
+    // 球体列表（对应 rankToPlayers 中的所有球体）
+    // 真实环境下从内存读取（CustomLayout.java 第1451行 获取玩家结构体()）
+    //   玩家结构体指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
+    //   半径: readFloat(playerBaseAddr + 0x28)
+    //   坐标: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
+    //         x = readFloat(coordAddr + 0x80)
+    //         y = 200 - readFloat(coordAddr + 0x84)
+    //
+    // 当无真实内存数据时（g_sphere_count == 0），使用演示球体数据
+    // 演示球体为静态位置（不旋转），模拟球球大作战中的多个球体
+    SphereEntity demo_list[8];
+    int draw_count;
+    SphereEntity* draw_list;
+    if (g_sphere_count > 0) {
+        draw_count = g_sphere_count;
+        draw_list = g_sphere_list;
+    } else {
+        // 演示球体：分布在世界坐标不同位置（相对 offsetX/Y 偏移）
+        // 这样转换后会分布在屏幕中心周围，模拟真实游戏场景
+        float demo_offsets[8][3] = {
+            {  5.0f,   3.0f, 12.0f},  // 右下
+            { -8.0f,   6.0f, 18.0f},  // 左下
+            { 12.0f,  -4.0f,  8.0f},  // 右上
+            { -6.0f,  -7.0f, 15.0f},  // 左上
+            { 15.0f,   8.0f, 20.0f},  // 远右下
+            {-14.0f,  10.0f, 10.0f},  // 远左下
+            {  3.0f, -12.0f, 14.0f},  // 上方
+            { -3.0f,   2.0f, 25.0f},  // 近距离大球
+        };
+        for (int i = 0; i < 8; i++) {
+            demo_list[i].x = offsetX + demo_offsets[i][0];
+            demo_list[i].y = offsetY + demo_offsets[i][1];
+            demo_list[i].radius = demo_offsets[i][2];
+            demo_list[i].rankId = i;
+        }
+        draw_count = 8;
+        draw_list = demo_list;
     }
 
-    // 中心点（我方球体位置 - 绿点，用户确认准确）
+    // 遍历所有球体绘制（对应 CustomLayout.java 第1656-1700行 遍历 rankToPlayers）
+    for (int i = 0; i < draw_count && i < MAX_SPHERES; i++) {
+        const SphereEntity& e = draw_list[i];
+
+        // 世界坐标 -> 屏幕坐标（CustomLayout.java 第1662-1669行）
+        float screenX = ((e.x - offsetX) * view_k) + startX;
+        float screenY = ((e.y - offsetY) * view_k) + startY;
+        float drawRadius = e.radius * view_k;
+        if (drawRadius < 2.0f) drawRadius = 2.0f;
+        if (drawRadius > 500.0f) drawRadius = 500.0f;
+
+        // 绘制连线（对应 drawView.addLine，CustomLayout.java 第1677-1681行）
+        if (g_draw_sphere_line) {
+            bg->AddLine(
+                ImVec2(startX, startY),
+                ImVec2(screenX, screenY),
+                sphere_color, 3.0f
+            );
+        }
+
+        // 绘制球体圆圈（对应 drawView.addCircle，Style=STROKE）
+        if (g_draw_sphere_circle) {
+            bg->AddCircle(
+                ImVec2(screenX, screenY),
+                drawRadius,
+                sphere_color, 48, 3.0f
+            );
+        }
+    }
+
+    // 中心点（我方球体位置 - 绿点）
     bg->AddCircleFilled(ImVec2(startX, startY), 5.0f, IM_COL32(0, 255, 0, 255), 16);
 }
 
@@ -1576,9 +1663,9 @@ void render_window() {
                         g_draw_sphere_enabled = !g_draw_sphere_enabled;
                     } // 绘制球体
                     ImGui::Separator();
-                    ImGui::SliderFloat("\xe7\x90\x83\xe4\xbd\x93\xe5\x8d\x8a\xe5\xbe\x84", &g_sphere_radius, 1.0f, 50.0f, "%.1f"); // 球体半径
-                    ImGui::Separator();
                     ImGui::SliderFloat("\xe7\x90\x83\xe4\xbd\x93\xe6\xaf\x94\xe4\xbe\x8b", &g_sphere_scale, 0.3f, 3.0f, "%.2f"); // 球体比例
+                    ImGui::Separator();
+                    ImGui::SliderFloat("\xe8\xa7\x86\xe5\x9b\xbe\xe6\xaf\x94\xe4\xbe\x8b", &g_sphere_view_scale, 1.0f, 100.0f, "%.2f"); // 视图比例
                     ImGui::Separator();
                     if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 加载配置
                 }
