@@ -11,7 +11,6 @@
 #include "zt_ttf.h"
 #include "Iconcpp.h"
 #include "logger.h"
-#include "styles.h"
 
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -260,7 +259,8 @@ static void JNICALL nativeInit(JNIEnv* env, jclass, jobject surface) {
     ImGui::GetStyle().ScaleAllSizes(1.0f);
     auto& s = ImGui::GetStyle();
     s.WindowRounding = 5.3f; s.FrameRounding = 2.3f; s.ScrollbarRounding = 0;
-    ImGui::ApplyMatchaGreenDarkTheme();
+    // 使用 ImGui 默认 Dark 主题（与旧项目一致，不调用任何主题函数）
+    ImGui::StyleColorsDark();
 
     if (!VulkanInit(window)) {
         LOGE("[VK] VulkanInit failed");
