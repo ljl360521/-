@@ -24,6 +24,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/sysinfo.h>
+#include <sys/uio.h>
+#include <sys/types.h>
 #include <vector>
 #include <algorithm>
 
@@ -66,26 +68,33 @@ struct SphereEntity {
 #define MAX_SPHERES 64
 
 // ---- 内存读取函数（对应 Memory.java 的 readFloat/readDword/pointerJump）----
-// 使用 KittyMemory::safeMemRead 安全读取，避免崩溃
+// 使用 process_vm_readv 读取自身进程内存
+// process_vm_readv 读取不可访问内存时返回 -1 而不是崩溃（SIGSEGV）
+// 这比 KittyMemory::safeMemRead 更安全（后者用 memcpy，中间页可能不可读）
+
+static bool safeReadMem(void* dest, uintptr_t src, size_t len) {
+    if (src == 0 || dest == nullptr || len == 0) return false;
+    struct iovec local_iov = {dest, len};
+    struct iovec remote_iov = {(void*)src, len};
+    ssize_t n = process_vm_readv(getpid(), &local_iov, 1, &remote_iov, 1, 0);
+    return n == (ssize_t)len;
+}
 
 static float mem_readFloat(uintptr_t addr) {
     float val = 0.0f;
-    if (!KittyMemory::isAddressReadable(addr)) return val;
-    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(float));
+    safeReadMem(&val, addr, sizeof(float));
     return val;
 }
 
 static int mem_readDword(uintptr_t addr) {
     int val = 0;
-    if (!KittyMemory::isAddressReadable(addr)) return val;
-    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(int));
+    safeReadMem(&val, addr, sizeof(int));
     return val;
 }
 
 static uintptr_t mem_readPtr(uintptr_t addr) {
     uintptr_t val = 0;
-    if (!KittyMemory::isAddressReadable(addr)) return val;
-    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(uintptr_t));
+    safeReadMem(&val, addr, sizeof(uintptr_t));
     return val;
 }
 
@@ -101,56 +110,71 @@ static uintptr_t mem_pointerJump(uintptr_t base, const long offsets[], int count
 }
 
 // ---- 内存搜索（对应 Memory.java RangeMemorySearch + MemoryOffset）----
-// 搜索匿名内存中的指定值
+// 使用 process_vm_readv 分块读取，避免崩溃
+// 限制：只搜索匿名内存，跳过超过 16MB 的大块，限制结果数量
 
-// 搜索 DWORD 值，返回所有匹配地址
-static std::vector<uintptr_t> mem_searchDword(int targetValue) {
+// 搜索 DWORD 值，返回所有匹配地址（最多 maxResults 个）
+static std::vector<uintptr_t> mem_searchDword(int targetValue, int maxResults = 200) {
     std::vector<uintptr_t> results;
     auto maps = KittyMemory::getAllMaps();
+    
+    const size_t MAX_BLOCK = 16 * 1024 * 1024;  // 跳过超过 16MB 的块
+    const size_t CHUNK = 256 * 1024;             // 分块读取大小
+    
     for (const auto& map : maps) {
         if (!map.isReadable()) continue;
-        // 只搜索匿名内存（对应 RANGE_ANONYMOUS）
-        if (!map.pathname.empty() && map.pathname[0] == '/') continue;
+        // 只搜索匿名内存（对应 RANGE_ANONYMOUS），跳过有路径的映射
+        if (!map.pathname.empty()) continue;
+        if (map.length > MAX_BLOCK) continue;  // 跳过超大块
         
         uintptr_t start = (uintptr_t)map.startAddr;
-        uintptr_t end = (uintptr_t)map.endAddr;
         size_t len = map.length;
         
-        // 读取整块内存
-        std::vector<char> buf(len);
-        if (KittyMemory::safeMemRead(buf.data(), (const void*)start, len) != KittyMemory::SUCCESS)
-            continue;
-        
-        // 搜索 DWORD
-        for (size_t i = 0; i + sizeof(int) <= len; i += 4) {
-            int val = *(int*)(buf.data() + i);
-            if (val == targetValue) {
-                results.push_back(start + i);
+        // 分块读取搜索
+        std::vector<char> buf(CHUNK);
+        for (size_t off = 0; off + sizeof(int) <= len; off += CHUNK - sizeof(int)) {
+            size_t readLen = std::min(CHUNK, len - off);
+            if (!safeReadMem(buf.data(), start + off, readLen)) break;
+            
+            for (size_t i = 0; i + sizeof(int) <= readLen; i += 4) {
+                int val = *(int*)(buf.data() + i);
+                if (val == targetValue) {
+                    results.push_back(start + off + i);
+                    if ((int)results.size() >= maxResults) return results;
+                }
             }
         }
     }
     return results;
 }
 
-// 搜索 FLOAT 值，返回所有匹配地址
-static std::vector<uintptr_t> mem_searchFloat(float targetValue) {
+// 搜索 FLOAT 值，返回所有匹配地址（最多 maxResults 个）
+static std::vector<uintptr_t> mem_searchFloat(float targetValue, int maxResults = 200) {
     std::vector<uintptr_t> results;
     auto maps = KittyMemory::getAllMaps();
+    
+    const size_t MAX_BLOCK = 16 * 1024 * 1024;
+    const size_t CHUNK = 256 * 1024;
+    
     for (const auto& map : maps) {
         if (!map.isReadable()) continue;
-        if (!map.pathname.empty() && map.pathname[0] == '/') continue;
+        if (!map.pathname.empty()) continue;
+        if (map.length > MAX_BLOCK) continue;
         
         uintptr_t start = (uintptr_t)map.startAddr;
         size_t len = map.length;
         
-        std::vector<char> buf(len);
-        if (KittyMemory::safeMemRead(buf.data(), (const void*)start, len) != KittyMemory::SUCCESS)
-            continue;
-        
-        for (size_t i = 0; i + sizeof(float) <= len; i += 4) {
-            float val = *(float*)(buf.data() + i);
-            if (val == targetValue) {
-                results.push_back(start + i);
+        std::vector<char> buf(CHUNK);
+        for (size_t off = 0; off + sizeof(float) <= len; off += CHUNK - sizeof(float)) {
+            size_t readLen = std::min(CHUNK, len - off);
+            if (!safeReadMem(buf.data(), start + off, readLen)) break;
+            
+            for (size_t i = 0; i + sizeof(float) <= readLen; i += 4) {
+                float val = *(float*)(buf.data() + i);
+                if (val == targetValue) {
+                    results.push_back(start + off + i);
+                    if ((int)results.size() >= maxResults) return results;
+                }
             }
         }
     }
@@ -170,25 +194,20 @@ static uintptr_t g_a5 = 0;                       // 玩家数组地址
 // 球体列表（对应 rankToPlayers）
 static SphereEntity g_sphere_list[MAX_SPHERES];
 static int g_sphere_count = 0;
-static std::atomic<bool> g_sphere_updating{false};
 static std::atomic<bool> g_sphere_search_done{false};
+static std::atomic<bool> g_sphere_searching{false};   // 正在搜索中
+static std::atomic<bool> g_sphere_search_failed{false}; // 搜索失败
 static std::thread g_sphere_thread;
-
-// 我方球体屏幕位置（从内存读取计算，不再用屏幕中心）
-static float g_my_sphere_screen_x = 0.0f;
-static float g_my_sphere_screen_y = 0.0f;
-static bool g_my_sphere_valid = false;
 
 // ---- 内存搜索 a3 和 a5（对应 CustomLayout.java 第942-973行）----
 static void SearchMemoryAddresses() {
     if (g_sphere_search_done) return;
-    g_sphere_search_done = true;
+    g_sphere_searching = true;
     
     // 搜索 a5: 搜索 "2333" DWORD，偏移 -1 at +12 和 +36，过滤 readFloat(addr+96)==0.0f
     // (对应 CustomLayout.java 第949-962行)
     auto dwordResults = mem_searchDword(2333);
     for (uintptr_t addr : dwordResults) {
-        // 偏移 -1 at +12 和 +36
         if (mem_readDword(addr + 12) == -1 && mem_readDword(addr + 36) == -1) {
             if (mem_readFloat(addr + 96) == 0.0f) {
                 g_a5 = addr;
@@ -206,19 +225,33 @@ static void SearchMemoryAddresses() {
             break;
         }
     }
+    
+    g_sphere_search_done = true;
+    g_sphere_searching = false;
+    if (g_a3 == 0 || g_a5 == 0) {
+        g_sphere_search_failed = true;
+    }
 }
 
 // ---- 获取玩家结构体（对应 CustomLayout.java 第1451行 获取玩家结构体()）----
 // 后台线程持续读取内存，更新 g_sphere_list
 static void UpdateSpheresThread() {
-    while (g_draw_sphere_enabled) {
+    // 第一步：搜索内存地址 a3 和 a5
+    while (g_draw_sphere_enabled && (g_a3 == 0 || g_a5 == 0)) {
+        SearchMemoryAddresses();
         if (g_a3 == 0 || g_a5 == 0) {
-            SearchMemoryAddresses();
-            if (g_a3 == 0 || g_a5 == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;
-            }
+            // 搜索失败，等待后重试
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            g_sphere_search_done = false;  // 允许重新搜索
+            continue;
         }
+    }
+    
+    if (!g_draw_sphere_enabled) return;
+    
+    // 第二步：持续读取球体数据
+    while (g_draw_sphere_enabled) {
+        if (g_a3 == 0 || g_a5 == 0) break;
         
         // 读取视图偏移（对应 CustomLayout.java 第1652-1653行）
         float offsetX = mem_readFloat(g_a3 - 100);
@@ -241,7 +274,7 @@ static void UpdateSpheresThread() {
             
             // 读取半径（对应 readFloat(playerBaseAddr + 0x28)）
             float radius = mem_readFloat(playerBaseAddr + 0x28);
-            if (radius <= 0.0f) continue;
+            if (radius <= 0.0f || radius > 10000.0f) continue;
             
             // 读取坐标（对应 CustomLayout.java 第1501-1509行）
             // 指针链: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
@@ -271,28 +304,6 @@ static void UpdateSpheresThread() {
         // 更新全局球体列表
         memcpy(g_sphere_list, local_list, sizeof(SphereEntity) * local_count);
         g_sphere_count = local_count;
-        
-        // 计算我方球体屏幕位置（最大的球体或第一个球体）
-        // 在球球大作战中，相机跟随我方球体，所以我方球体在屏幕中心
-        // 但我们从内存读取我方球体的世界坐标，通过坐标转换得到屏幕位置
-        if (local_count > 0) {
-            // 找最大的球体作为我方球体
-            int maxIdx = 0;
-            float maxRadius = local_list[0].radius;
-            for (int i = 1; i < local_count; i++) {
-                if (local_list[i].radius > maxRadius) {
-                    maxRadius = local_list[i].radius;
-                    maxIdx = i;
-                }
-            }
-            // 我方球体的世界坐标就是视图中心，转换后应该在屏幕中心附近
-            // 但我们用 offsetX/Y 作为我方球体位置（因为相机跟随）
-            g_my_sphere_screen_x = 0.0f;  // 相对偏移为0，即在屏幕中心
-            g_my_sphere_screen_y = 0.0f;
-            g_my_sphere_valid = true;
-        } else {
-            g_my_sphere_valid = false;
-        }
         
         // 刷新延时（对应 CustomLayout.java 刷新延时=8）
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
@@ -1489,13 +1500,24 @@ static void DrawSpheres() {
     float startX = io.DisplaySize.x * 0.5f;
     float startY = io.DisplaySize.y * 0.5f;
 
-    // 如果没有内存数据，显示提示文字
-    if (g_sphere_count == 0) {
+    // 如果正在搜索内存，显示提示文字
+    if (g_sphere_searching || (g_sphere_count == 0 && !g_sphere_search_failed)) {
         bg->AddText(ImVec2(startX - 100, startY - 20),
             IM_COL32(255, 255, 0, 255),
             "\xe6\xad\xa3\xe5\x9c\xa8\xe6\x90\x9c\xe7\xb4\xa2\xe5\x86\x85\xe5\xad\x98..."); // 正在搜索内存...
         return;
     }
+    
+    // 如果搜索失败，显示错误提示
+    if (g_sphere_search_failed && g_sphere_count == 0) {
+        bg->AddText(ImVec2(startX - 120, startY - 20),
+            IM_COL32(255, 0, 0, 255),
+            "\xe5\x86\x85\xe5\xad\x98\xe6\x90\x9c\xe7\xb4\xa2\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x8c\xe8\xaf\xb7\xe7\xa1\xae\xe8\xae\xa4\xe6\xb8\xb8\xe6\x88\x8f\xe5\xb7\xb2\xe5\xbc\x80\xe5\xa7\x8b"); // 内存搜索失败，请确认游戏已开始
+        return;
+    }
+    
+    // 如果没有球体数据，不绘制
+    if (g_sphere_count == 0) return;
 
     // 读取视图偏移和视图比例（对应 CustomLayout.java 第1652-1653行）
     // offsetX = memory.readFloat(a3 - 100)
@@ -1852,6 +1874,8 @@ void render_window() {
                             // 启动后台内存读取线程
                             if (g_sphere_thread.joinable()) g_sphere_thread.join();
                             g_sphere_search_done = false;
+                            g_sphere_searching = false;
+                            g_sphere_search_failed = false;
                             g_a3 = 0;
                             g_a5 = 0;
                             g_sphere_count = 0;
