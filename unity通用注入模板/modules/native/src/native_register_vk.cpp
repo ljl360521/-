@@ -8,6 +8,7 @@
 #include "CircularButton.h"
 #include "gui.h"
 #include "aura_ui.hpp"
+#include "zt_ttf.h"
 #include "Iconcpp.h"
 #include "logger.h"
 #include "styles.h"
@@ -237,23 +238,24 @@ static void JNICALL nativeInit(JNIEnv* env, jclass, jobject surface) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = NULL;
 
-    if (OPPOSans_H_size > 0) {
-        ImFontConfig cfg; cfg.SizePixels = 20.0f;
-        cfg.FontDataOwnedByAtlas = false;  // 静态数组，不能被 ImGui free
-        io.Fonts->AddFontFromMemoryTTF((void*)OPPOSans_H, (int)OPPOSans_H_size, 22.0f,
-            &cfg, io.Fonts->GetGlyphRangesChineseFull());
-    }
-
-    // 合并加载 FontAwesome 图标字体（用于 ICON_FA_* 宏渲染图标）
-    if (font_awesome_size > 0) {
-        ImFontConfig faCfg;
-        faCfg.MergeMode = true;
-        faCfg.PixelSnapH = true;
-        faCfg.FontDataOwnedByAtlas = false;  // 静态数组，不能被 ImGui free
-        static const ImWchar fa_ranges[] = { 0xF000, 0xF8FF, 0 };
-        io.Fonts->AddFontFromMemoryTTF((void*)font_awesome_data, (int)font_awesome_size,
-            22.0f, &faCfg, fa_ranges);
-    }
+    // 字体加载（严格按旧项目 imguijni.cpp 移植）
+    ImFontConfig config;
+    config.FontDataOwnedByAtlas = false;
+    config.OversampleH = 1;
+    static const ImWchar icons_ranges[] = { 0xf000, 0xf3ff, 0 };
+    ImFontConfig icons_config;
+    icons_config.MergeMode = true;
+    icons_config.PixelSnapH = true;
+    icons_config.OversampleH = 2.5;
+    icons_config.OversampleV = 2.5;
+    icons_config.FontDataOwnedByAtlas = false;
+    // 主字体 28px + FontAwesome 28px 合并
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, (int)zt_ttf_len, 28.0f, &config, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontFromMemoryCompressedTTF((const void*)font_awesome_data, (int)font_awesome_size, 28.0f, &icons_config, icons_ranges);
+    // Large 30px / Superlarge 40px
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, (int)zt_ttf_len, 30.0f, &config, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontFromMemoryTTF((void*)zt_ttf, (int)zt_ttf_len, 40.0f, &config, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontDefault(&config);
 
     ImGui::GetStyle().ScaleAllSizes(1.0f);
     auto& s = ImGui::GetStyle();
