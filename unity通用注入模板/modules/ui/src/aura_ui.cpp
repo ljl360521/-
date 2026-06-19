@@ -13,6 +13,7 @@
 #include "native_register_vk.h"
 #include "logger.h"
 #include "KittyMemory.h"
+#include "il2cpp_api.h"
 
 #include <cstdio>
 #include <cstring>
@@ -52,261 +53,276 @@ int Prevent = 0;
 float window_opacity = 0.85f;  // 窗口透明度（0=全透明, 1=不透明）
 
 // ============================================================================
-// 绘制球体功能（移植自球球大作战 DrawView.java + CustomLayout.java + Memory.java）
-// 使用 KittyMemory 进行真实内存读写
-// 坐标转换公式: screenX = ((entity.x - offsetX) * 23.25f * 比例 * (23.25f * 比例 / 视图比例)) + startX
+// 绘制球体功能（基于 IL2CPP API 访问 GameCoreCenter.BallDic）
+// 通过 il2cpp_class_from_name + il2cpp_field_get_offset 动态获取字段偏移
+// 不依赖硬编码偏移，游戏更新也能自适应
 // ============================================================================
 
-// 球体数据结构（对应 CustomLayout.java 第1354行 addCircle 类）
+// 球体数据结构
 struct SphereEntity {
-    float x;        // 世界坐标 X (readFloat(coordAddr + 0x80))
-    float y;        // 世界坐标 Y (200 - readFloat(coordAddr + 0x84))
-    float radius;   // 球体半径 (readFloat(playerBaseAddr + 0x28))
+    float x;        // 世界坐标 X
+    float y;        // 世界坐标 Y
+    float radius;   // 球体半径
     int rankId;     // 组ID
 };
 
-#define MAX_SPHERES 64
-
-// ---- 内存读取函数（对应 Memory.java 的 readFloat/readDword/pointerJump）----
-// 使用 process_vm_readv 读取自身进程内存
-// process_vm_readv 读取不可访问内存时返回 -1 而不是崩溃（SIGSEGV）
-// 这比 KittyMemory::safeMemRead 更安全（后者用 memcpy，中间页可能不可读）
-
-static bool safeReadMem(void* dest, uintptr_t src, size_t len) {
-    if (src == 0 || dest == nullptr || len == 0) return false;
-    struct iovec local_iov = {dest, len};
-    struct iovec remote_iov = {(void*)src, len};
-    ssize_t n = process_vm_readv(getpid(), &local_iov, 1, &remote_iov, 1, 0);
-    return n == (ssize_t)len;
-}
-
-static float mem_readFloat(uintptr_t addr) {
-    float val = 0.0f;
-    safeReadMem(&val, addr, sizeof(float));
-    return val;
-}
-
-static int mem_readDword(uintptr_t addr) {
-    int val = 0;
-    safeReadMem(&val, addr, sizeof(int));
-    return val;
-}
-
-static uintptr_t mem_readPtr(uintptr_t addr) {
-    uintptr_t val = 0;
-    safeReadMem(&val, addr, sizeof(uintptr_t));
-    return val;
-}
-
-// 指针跳转（对应 Memory.java pointerJump）
-// base + offsets[0] -> ptr, ptr + offsets[1] -> ptr2, ... 返回最终指针
-static uintptr_t mem_pointerJump(uintptr_t base, const long offsets[], int count) {
-    uintptr_t ptr = base;
-    for (int i = 0; i < count && ptr != 0; i++) {
-        ptr = mem_readPtr(ptr + offsets[i]);
-        if (ptr == 0) return 0;
-    }
-    return ptr;
-}
-
-// ---- 内存搜索（对应 Memory.java RangeMemorySearch + MemoryOffset）----
-// 使用 process_vm_readv 分块读取，避免崩溃
-// 限制：只搜索匿名内存，跳过超过 16MB 的大块，限制结果数量
-
-// 搜索 DWORD 值，返回所有匹配地址（最多 maxResults 个）
-static std::vector<uintptr_t> mem_searchDword(int targetValue, int maxResults = 200) {
-    std::vector<uintptr_t> results;
-    auto maps = KittyMemory::getAllMaps();
-    
-    const size_t MAX_BLOCK = 16 * 1024 * 1024;  // 跳过超过 16MB 的块
-    const size_t CHUNK = 256 * 1024;             // 分块读取大小
-    
-    for (const auto& map : maps) {
-        if (!map.isReadable()) continue;
-        // 只搜索匿名内存（对应 RANGE_ANONYMOUS），跳过有路径的映射
-        if (!map.pathname.empty()) continue;
-        if (map.length > MAX_BLOCK) continue;  // 跳过超大块
-        
-        uintptr_t start = (uintptr_t)map.startAddr;
-        size_t len = map.length;
-        
-        // 分块读取搜索
-        std::vector<char> buf(CHUNK);
-        for (size_t off = 0; off + sizeof(int) <= len; off += CHUNK - sizeof(int)) {
-            size_t readLen = std::min(CHUNK, len - off);
-            if (!safeReadMem(buf.data(), start + off, readLen)) break;
-            
-            for (size_t i = 0; i + sizeof(int) <= readLen; i += 4) {
-                int val = *(int*)(buf.data() + i);
-                if (val == targetValue) {
-                    results.push_back(start + off + i);
-                    if ((int)results.size() >= maxResults) return results;
-                }
-            }
-        }
-    }
-    return results;
-}
-
-// 搜索 FLOAT 值，返回所有匹配地址（最多 maxResults 个）
-static std::vector<uintptr_t> mem_searchFloat(float targetValue, int maxResults = 200) {
-    std::vector<uintptr_t> results;
-    auto maps = KittyMemory::getAllMaps();
-    
-    const size_t MAX_BLOCK = 16 * 1024 * 1024;
-    const size_t CHUNK = 256 * 1024;
-    
-    for (const auto& map : maps) {
-        if (!map.isReadable()) continue;
-        if (!map.pathname.empty()) continue;
-        if (map.length > MAX_BLOCK) continue;
-        
-        uintptr_t start = (uintptr_t)map.startAddr;
-        size_t len = map.length;
-        
-        std::vector<char> buf(CHUNK);
-        for (size_t off = 0; off + sizeof(float) <= len; off += CHUNK - sizeof(float)) {
-            size_t readLen = std::min(CHUNK, len - off);
-            if (!safeReadMem(buf.data(), start + off, readLen)) break;
-            
-            for (size_t i = 0; i + sizeof(float) <= readLen; i += 4) {
-                float val = *(float*)(buf.data() + i);
-                if (val == targetValue) {
-                    results.push_back(start + off + i);
-                    if ((int)results.size() >= maxResults) return results;
-                }
-            }
-        }
-    }
-    return results;
-}
+#define MAX_SPHERES 128
 
 // ---- 球体绘制全局变量 ----
 static bool g_draw_sphere_enabled = false;       // 绘制球体开关
-static bool g_draw_sphere_line = true;           // 绘制连线（drawView.addLine）
-static bool g_draw_sphere_circle = true;         // 绘制圆球（drawView.addCircle）
-static float g_sphere_scale = 1.0f;              // 比例（parameters.比例）
+static bool g_draw_sphere_line = true;           // 绘制连线
+static bool g_draw_sphere_circle = true;         // 绘制圆球
+static float g_sphere_scale = 1.0f;              // 比例
 
-// 内存地址（对应 CustomLayout.java 中的 a3 和 a5）
-static uintptr_t g_a3 = 0;                       // 视图偏移地址
-static uintptr_t g_a5 = 0;                       // 玩家数组地址
+// IL2CPP 缓存的类和字段偏移
+static bool g_il2cpp_sphere_inited = false;
+static Il2CppClass* g_class_GameCoreCenter = nullptr;
+static Il2CppClass* g_class_DrawCircle = nullptr;
+static size_t g_off_instance = (size_t)-1;       // GameCoreCenter.instance 静态字段偏移
+static size_t g_off_BallDic = (size_t)-1;        // GameCoreCenter.BallDic 实例字段偏移
+static size_t g_off_DC_Radius = (size_t)-1;      // DrawCircle.Radius
+static size_t g_off_DC_pos = (size_t)-1;         // DrawCircle.pos (Vector3)
+static size_t g_off_DC_SelfTF = (size_t)-1;      // DrawCircle.SelfTF (Transform)
+static size_t g_off_DC_ID = (size_t)-1;          // DrawCircle.ID
+static size_t g_off_DC_curScore = (size_t)-1;    // DrawCircle.curScore
 
-// 球体列表（对应 rankToPlayers）
+// Unity icall 函数指针
+// Transform.get_position_Injected(Transform* self, Vector3* outPos)
+typedef void (*Transform_get_position_t)(void* self, void* outPos);
+static Transform_get_position_t p_Transform_get_position = nullptr;
+
+// 球体列表
 static SphereEntity g_sphere_list[MAX_SPHERES];
 static int g_sphere_count = 0;
-static std::atomic<bool> g_sphere_search_done{false};
-static std::atomic<bool> g_sphere_searching{false};   // 正在搜索中
-static std::atomic<bool> g_sphere_search_failed{false}; // 搜索失败
+static std::atomic<bool> g_sphere_searching{false};
+static std::atomic<bool> g_sphere_search_failed{false};
 static std::thread g_sphere_thread;
 
-// ---- 内存搜索 a3 和 a5（对应 CustomLayout.java 第942-973行）----
-static void SearchMemoryAddresses() {
-    if (g_sphere_search_done) return;
-    g_sphere_searching = true;
-    
-    // 搜索 a5: 搜索 "2333" DWORD，偏移 -1 at +12 和 +36，过滤 readFloat(addr+96)==0.0f
-    // (对应 CustomLayout.java 第949-962行)
-    auto dwordResults = mem_searchDword(2333);
-    for (uintptr_t addr : dwordResults) {
-        if (mem_readDword(addr + 12) == -1 && mem_readDword(addr + 36) == -1) {
-            if (mem_readFloat(addr + 96) == 0.0f) {
-                g_a5 = addr;
-                break;
-            }
-        }
-    }
-    
-    // 搜索 a3: 搜索 "14.5" FLOAT，偏移 "800" at -104
-    // (对应 CustomLayout.java 第966-972行)
-    auto floatResults = mem_searchFloat(14.5f);
-    for (uintptr_t addr : floatResults) {
-        if (mem_readFloat(addr - 104) == 800.0f) {
-            g_a3 = addr;
-            break;
-        }
-    }
-    
-    g_sphere_search_done = true;
-    g_sphere_searching = false;
-    if (g_a3 == 0 || g_a5 == 0) {
+// 我方球体世界坐标（用于坐标转换中心点）
+static float g_my_sphere_world_x = 0.0f;
+static float g_my_sphere_world_y = 0.0f;
+static bool g_my_sphere_valid = false;
+
+// 初始化 IL2CPP 字段偏移
+static bool InitSphereIl2cppOffsets() {
+    if (g_il2cpp_sphere_inited) return true;
+    if (!il2cpp_api_init()) {
         g_sphere_search_failed = true;
+        return false;
     }
+
+    // 查找 GameCoreCenter 类（无命名空间）
+    g_class_GameCoreCenter = il2cpp_get_class("", "GameCoreCenter");
+    if (!g_class_GameCoreCenter) {
+        LOGE("SphereDraw: 找不到 GameCoreCenter 类");
+        g_sphere_search_failed = true;
+        return false;
+    }
+
+    // 查找 DrawCircle 类
+    g_class_DrawCircle = il2cpp_get_class("", "DrawCircle");
+    if (!g_class_DrawCircle) {
+        LOGE("SphereDraw: 找不到 DrawCircle 类");
+        g_sphere_search_failed = true;
+        return false;
+    }
+
+    // 获取字段偏移
+    // GameCoreCenter.instance 是静态字段，用 il2cpp_get_static_field_data 获取静态区
+    // BallDic 是实例字段
+    g_off_BallDic = il2cpp_get_field_offset(g_class_GameCoreCenter, "BallDic");
+    if (g_off_BallDic == (size_t)-1) {
+        LOGE("SphereDraw: 找不到 GameCoreCenter.BallDic 字段");
+        g_sphere_search_failed = true;
+        return false;
+    }
+
+    g_off_DC_Radius = il2cpp_get_field_offset(g_class_DrawCircle, "Radius");
+    g_off_DC_pos = il2cpp_get_field_offset(g_class_DrawCircle, "pos");
+    g_off_DC_SelfTF = il2cpp_get_field_offset(g_class_DrawCircle, "SelfTF");
+    g_off_DC_ID = il2cpp_get_field_offset(g_class_DrawCircle, "ID");
+    g_off_DC_curScore = il2cpp_get_field_offset(g_class_DrawCircle, "curScore");
+
+    LOGI("SphereDraw: 偏移 BallDic=0x%zx Radius=0x%zx pos=0x%zx SelfTF=0x%zx",
+         g_off_BallDic, g_off_DC_Radius, g_off_DC_pos, g_off_DC_SelfTF);
+
+    // 获取 Unity Transform.get_position icall
+    // 这个 icall 返回的是内部函数，签名: void get_position_Injected(Transform*, Vector3*)
+    p_Transform_get_position = (Transform_get_position_t)il2cpp_get_icall("UnityEngine.Transform::get_position_Injected");
+
+    g_il2cpp_sphere_inited = true;
+    return true;
 }
 
-// ---- 获取玩家结构体（对应 CustomLayout.java 第1451行 获取玩家结构体()）----
-// 后台线程持续读取内存，更新 g_sphere_list
+// 读取 Vector3（通过 Transform icall 或直接读内存）
+struct Vec3 { float x, y, z; };
+
+static Vec3 GetTransformPosition(void* transform) {
+    Vec3 pos = {0, 0, 0};
+    if (!transform) return pos;
+    if (p_Transform_get_position) {
+        // 用 icall 获取世界坐标（最准确）
+        p_Transform_get_position(transform, &pos);
+    } else {
+        // fallback: 直接读 Transform 内部数据（不准确，不同版本布局不同）
+        // 这里不实现，依赖 icall
+    }
+    return pos;
+}
+
+// 遍历 Dictionary<UInt32, DrawCircle> 获取所有 DrawCircle
+// IL2CPP Dictionary 内部结构:
+//   entries 数组在偏移 0x68（不同版本可能不同）
+//   count 在偏移 0x58
+// 这里用 il2cpp 调用 GetEnumerator 的方式太复杂，改用直接读内存
+// 但 Dictionary 内部布局版本相关，所以我们用更简单的方式：
+// 通过 GameCoreCenter.BallUpdateList（BetterList<ControlBase>）遍历
+// 或者直接遍历 Dictionary 的 entries
+
+// 实际上，最可靠的方式是 Hook 渲染方法。但这里我们用 Dictionary 内部遍历
+// IL2CPP Dictionary 布局（Unity 2019+）:
+//   offset 0x18: buckets (int[])
+//   offset 0x20: entries (Entry[])  <- 关键
+//   offset 0x28: count
+//   offset 0x40: version
+// Entry 结构: { int hashCode, int next, TKey key, TValue value }
+//   对于 Dictionary<UInt32, DrawCircle>:
+//   { int hashCode(4), int next(4), UInt32 key(4), padding(4), void* value(8) } = 24 bytes
+// 但这个布局版本相关，我们用 il2cpp_get_field_offset 动态获取
+
+// 简化方案：直接读 Dictionary 的 entries 数组和 count
+// entries 字段偏移需要动态获取
+static size_t g_off_Dict_entries = (size_t)-1;
+static size_t g_off_Dict_count = (size_t)-1;
+
+// 后台线程：持续读取球体数据
 static void UpdateSpheresThread() {
-    // 第一步：搜索内存地址 a3 和 a5
-    while (g_draw_sphere_enabled && (g_a3 == 0 || g_a5 == 0)) {
-        SearchMemoryAddresses();
-        if (g_a3 == 0 || g_a5 == 0) {
-            // 搜索失败，等待后重试
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            g_sphere_search_done = false;  // 允许重新搜索
+    // 初始化 IL2CPP
+    while (g_draw_sphere_enabled && !g_il2cpp_sphere_inited) {
+        g_sphere_searching = true;
+        if (InitSphereIl2cppOffsets()) {
+            g_sphere_searching = false;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
+    g_sphere_searching = false;
+
+    if (!g_draw_sphere_enabled || !g_il2cpp_sphere_inited) return;
+
+    // 持续读取球体数据
+    while (g_draw_sphere_enabled) {
+        // 获取 GameCoreCenter.instance（静态字段）
+        void* static_data = il2cpp_get_static_field_data(g_class_GameCoreCenter);
+        if (!static_data) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
-    }
-    
-    if (!g_draw_sphere_enabled) return;
-    
-    // 第二步：持续读取球体数据
-    while (g_draw_sphere_enabled) {
-        if (g_a3 == 0 || g_a5 == 0) break;
-        
-        // 读取视图偏移（对应 CustomLayout.java 第1652-1653行）
-        float offsetX = mem_readFloat(g_a3 - 100);
-        float offsetY = 200.0f - mem_readFloat(g_a3 - 96);
-        float viewScale = mem_readFloat(g_a3 - 0x38);
-        if (viewScale <= 0.0f) viewScale = 23.25f;
-        
+
+        // instance 是 <instance>k__BackingField，需要找到它的偏移
+        // 静态字段在 static_data 中，偏移需要单独获取
+        // 这里用 il2cpp_get_static_field_value 获取 instance
+        void* instance = nullptr;
+        il2cpp_get_static_field_value(g_class_GameCoreCenter, "<instance>k__BackingField", &instance);
+        if (!instance) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        // 读取 BallDic（Dictionary<UInt32, DrawCircle>*）
+        void* ballDic = il2cpp_read_ptr(instance, g_off_BallDic);
+        if (!ballDic) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        // 获取 Dictionary 的 entries 和 count
+        // 尝试动态获取 entries 字段偏移
+        if (g_off_Dict_entries == (size_t)-1) {
+            Il2CppClass* dictClass = il2cpp_get_class("System.Collections.Generic", "Dictionary`2");
+            if (dictClass) {
+                g_off_Dict_entries = il2cpp_get_field_offset(dictClass, "_entries");
+                g_off_Dict_count = il2cpp_get_field_offset(dictClass, "_count");
+                LOGI("SphereDraw: Dictionary _entries=0x%zx _count=0x%zx", g_off_Dict_entries, g_off_Dict_count);
+            }
+        }
+
         SphereEntity local_list[MAX_SPHERES];
         int local_count = 0;
-        
-        // 遍历玩家数组（对应 CustomLayout.java 第1469-1547行）
-        // 每个玩家 0x18 字节，指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
-        for (int i = 0; i < 512 && local_count < MAX_SPHERES; i++) {
-            long offsets[] = {0x18, 0x0};
-            uintptr_t playerBaseAddr = mem_pointerJump(g_a5 + i * 0x18, offsets, 2);
-            if (playerBaseAddr == 0) continue;
-            
-            // 验证玩家（对应 readDword(playerBaseAddr + 0x20) == 1）
-            if (mem_readDword(playerBaseAddr + 0x20) != 1) continue;
-            
-            // 读取半径（对应 readFloat(playerBaseAddr + 0x28)）
-            float radius = mem_readFloat(playerBaseAddr + 0x28);
-            if (radius <= 0.0f || radius > 10000.0f) continue;
-            
-            // 读取坐标（对应 CustomLayout.java 第1501-1509行）
-            // 指针链: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
-            long coordOffsets[] = {0x18, 0x0};
-            uintptr_t coordAddr = mem_pointerJump(playerBaseAddr, coordOffsets, 2);
-            if (coordAddr == 0) continue;
-            
-            float x = mem_readFloat(coordAddr + 0x80);
-            float y = 200.0f - mem_readFloat(coordAddr + 0x84);
-            
-            // 读取 rankId（对应 CustomLayout.java 第1511-1522行）
-            // 指针链: [coordAddr] → [0x30] → [0x0] → rankAddr
-            long rankOffsets[] = {0x30, 0x0};
-            uintptr_t rankAddr = mem_pointerJump(coordAddr, rankOffsets, 2);
-            int rankId = 0;
-            if (rankAddr != 0) {
-                rankId = mem_readDword(rankAddr + 0x10);
+        float myRadius = 0.0f;
+        Vec3 myPos = {0, 0, 0};
+
+        if (g_off_Dict_entries != (size_t)-1 && g_off_Dict_count != (size_t)-1) {
+            // 读取 count
+            int count = il2cpp_read_field<int>(ballDic, g_off_Dict_count);
+            if (count < 0) count = 0;
+            if (count > 1024) count = 1024;
+
+            // 读取 entries 数组（IL2CPP 数组结构: [ptr, monitor, bounds(8), length(8), data...]）
+            void* entriesArr = il2cpp_read_ptr(ballDic, g_off_Dict_entries);
+            if (entriesArr) {
+                // IL2CPP 数组: 偏移 0x18 是 length，0x20 开始是数据
+                // 但实际布局: Il2CppArray 头部 + bounds + max_length + data
+                // 简化: 假设偏移 0x18 是 length，0x20 开始是元素
+                int arrLen = il2cpp_read_field<int>(entriesArr, 0x18);
+                if (arrLen > 1024) arrLen = 1024;
+
+                // Entry 结构: { int hashCode, int next, UInt32 key, padding, void* value }
+                // = 4 + 4 + 4 + 4 + 8 = 24 bytes (32位下可能不同)
+                // 但在 64 位下，指针是 8 字节，可能有对齐
+                // 假设 Entry: hashCode(4) + next(4) + key(4) + pad(4) + value(8) = 24
+                const int ENTRY_SIZE = 24;
+                const int ENTRY_VALUE_OFFSET = 16;  // value 在 Entry 中的偏移
+                const int ENTRY_HASH_OFFSET = 0;    // hashCode 在 Entry 中的偏移
+
+                for (int i = 0; i < arrLen && local_count < MAX_SPHERES; i++) {
+                    char* entry = (char*)entriesArr + 0x20 + i * ENTRY_SIZE;
+                    int hashCode = *(int*)(entry + ENTRY_HASH_OFFSET);
+                    if (hashCode < 0) continue;  // 空槽位
+
+                    void* drawCircle = *(void**)(entry + ENTRY_VALUE_OFFSET);
+                    if (!drawCircle) continue;
+
+                    // 读取 DrawCircle 数据
+                    float radius = il2cpp_read_field<float>(drawCircle, g_off_DC_Radius);
+                    if (radius <= 0.0f) continue;
+
+                    // 读取位置：优先用 SelfTF（Transform）的世界坐标
+                    Vec3 pos = {0, 0, 0};
+                    if (g_off_DC_SelfTF != (size_t)-1) {
+                        void* selfTF = il2cpp_read_ptr(drawCircle, g_off_DC_SelfTF);
+                        if (selfTF) {
+                            pos = GetTransformPosition(selfTF);
+                        }
+                    }
+                    // fallback: 读 pos 字段
+                    if (pos.x == 0 && pos.y == 0 && pos.z == 0 && g_off_DC_pos != (size_t)-1) {
+                        pos = il2cpp_read_field<Vec3>(drawCircle, g_off_DC_pos);
+                    }
+
+                    local_list[local_count].x = pos.x;
+                    local_list[local_count].y = pos.y;
+                    local_list[local_count].radius = radius;
+                    local_list[local_count].rankId = 0;
+                    local_count++;
+
+                    // 记录最大的球体作为我方球体
+                    if (radius > myRadius) {
+                        myRadius = radius;
+                        myPos = pos;
+                    }
+                }
             }
-            
-            local_list[local_count].x = x;
-            local_list[local_count].y = y;
-            local_list[local_count].radius = radius;
-            local_list[local_count].rankId = rankId;
-            local_count++;
         }
-        
-        // 更新全局球体列表
+
+        // 更新全局数据
         memcpy(g_sphere_list, local_list, sizeof(SphereEntity) * local_count);
         g_sphere_count = local_count;
-        
-        // 刷新延时（对应 CustomLayout.java 刷新延时=8）
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        g_my_sphere_world_x = myPos.x;
+        g_my_sphere_world_y = myPos.y;
+        g_my_sphere_valid = (local_count > 0);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));  // ~60fps
     }
 }
 
@@ -1483,10 +1499,10 @@ void render_dynamic_island() {
 }
 
 // ============================================================================
-// DrawSpheres - 绘制球体（移植自球球大作战 DrawView.java + CustomLayout.java）
+// DrawSpheres - 绘制球体
 // 使用 ImGui BackgroundDrawList 在游戏画面上层绘制所有球体
-// 数据来源: UpdateSpheresThread() 从内存读取的真实球体数据
-// 逻辑来源: CustomLayout.java 第1634-1700行 绘制玩家线段()
+// 数据来源: UpdateSpheresThread() 通过 IL2CPP API 读取 GameCoreCenter.BallDic
+// 坐标转换: 用我方球体世界坐标作为屏幕中心，其他球体按相对偏移和比例转换
 // ============================================================================
 
 static void DrawSpheres() {
@@ -1495,80 +1511,77 @@ static void DrawSpheres() {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    // 屏幕中心 = 我方球体位置（对应 parameters.分辨率x/2, 分辨率y/2）
-    // 在球球大作战中，相机跟随我方球体，所以我方球体在屏幕中心
+    // 屏幕中心 = 我方球体位置（相机跟随我方球体）
     float startX = io.DisplaySize.x * 0.5f;
     float startY = io.DisplaySize.y * 0.5f;
 
-    // 如果正在搜索内存，显示提示文字
-    if (g_sphere_searching || (g_sphere_count == 0 && !g_sphere_search_failed)) {
+    // 如果正在初始化 IL2CPP，显示提示
+    if (g_sphere_searching) {
         bg->AddText(ImVec2(startX - 100, startY - 20),
             IM_COL32(255, 255, 0, 255),
-            "\xe6\xad\xa3\xe5\x9c\xa8\xe6\x90\x9c\xe7\xb4\xa2\xe5\x86\x85\xe5\xad\x98..."); // 正在搜索内存...
+            "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP..."); // 正在初始化 IL2CPP...
         return;
     }
-    
-    // 如果搜索失败，显示错误提示
+
+    // 如果初始化失败，显示错误提示
     if (g_sphere_search_failed && g_sphere_count == 0) {
-        bg->AddText(ImVec2(startX - 120, startY - 20),
+        bg->AddText(ImVec2(startX - 140, startY - 20),
             IM_COL32(255, 0, 0, 255),
-            "\xe5\x86\x85\xe5\xad\x98\xe6\x90\x9c\xe7\xb4\xa2\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x8c\xe8\xaf\xb7\xe7\xa1\xae\xe8\xae\xa4\xe6\xb8\xb8\xe6\x88\x8f\xe5\xb7\xb2\xe5\xbc\x80\xe5\xa7\x8b"); // 内存搜索失败，请确认游戏已开始
+            "\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x8c\xe8\xaf\xb7\xe7\xa1\xae\xe8\xae\xa4\xe6\xb8\xb8\xe6\x88\x8f\xe5\xb7\xb2\xe5\xbc\x80\xe5\xa7\x8b"); // 初始化失败，请确认游戏已开始
         return;
     }
-    
+
     // 如果没有球体数据，不绘制
     if (g_sphere_count == 0) return;
 
-    // 读取视图偏移和视图比例（对应 CustomLayout.java 第1652-1653行）
-    // offsetX = memory.readFloat(a3 - 100)
-    // offsetY = 200 - memory.readFloat(a3 - 96)
-    // 视图比例 = memory.readFloat(a3 - 0x38)
-    float offsetX = 0.0f, offsetY = 100.0f, viewScale = 23.25f;
-    if (g_a3 != 0) {
-        offsetX = mem_readFloat(g_a3 - 100);
-        offsetY = 200.0f - mem_readFloat(g_a3 - 96);
-        viewScale = mem_readFloat(g_a3 - 0x38);
-        if (viewScale <= 0.0f) viewScale = 23.25f;
-    }
+    // 坐标转换：用我方球体世界坐标作为屏幕中心
+    // 其他球体相对我方球体的世界坐标差，乘以比例系数得到屏幕偏移
+    // 比例系数 g_sphere_scale 可调节（用户通过滑块调整）
+    // 球球大作战中，世界坐标单位约等于像素/23.25，这里用 g_sphere_scale 调节
+    float world_to_screen = 23.25f * g_sphere_scale;
 
-    // 坐标转换系数（对应 CustomLayout.java 第1662-1672行）
-    // k = 23.25 * 比例
-    // view_k = k * (k / 视图比例) = 23.25 * 比例 * (23.25 * 比例 / 视图比例)
-    float k = 23.25f * g_sphere_scale;
-    float view_k = k * (k / viewScale);
+    // 我方球体世界坐标（屏幕中心）
+    float myX = g_my_sphere_world_x;
+    float myY = g_my_sphere_world_y;
 
-    // 颜色（对应 CustomLayout.java 中的 Color.parseColor("#FFFFFF")）
+    // 颜色
     ImU32 sphere_color = IM_COL32(255, 255, 255, 255);  // 白色
+    ImU32 my_color = IM_COL32(0, 255, 0, 255);          // 绿色（我方）
 
-    // 遍历所有球体绘制（对应 CustomLayout.java 第1656-1700行 遍历 rankToPlayers）
+    // 遍历所有球体绘制
     int count = g_sphere_count;
     if (count > MAX_SPHERES) count = MAX_SPHERES;
 
     for (int i = 0; i < count; i++) {
         const SphereEntity& e = g_sphere_list[i];
 
-        // 世界坐标 -> 屏幕坐标（CustomLayout.java 第1662-1669行）
-        float screenX = ((e.x - offsetX) * view_k) + startX;
-        float screenY = ((e.y - offsetY) * view_k) + startY;
-        float drawRadius = e.radius * view_k;
-        if (drawRadius < 2.0f) drawRadius = 2.0f;
+        // 世界坐标 -> 屏幕坐标
+        // 相对我方球体的偏移 * 比例 + 屏幕中心
+        float screenX = ((e.x - myX) * world_to_screen) + startX;
+        float screenY = ((e.y - myY) * world_to_screen) + startY;
+        float drawRadius = e.radius * world_to_screen;
+        if (drawRadius < 3.0f) drawRadius = 3.0f;
         if (drawRadius > 500.0f) drawRadius = 500.0f;
 
-        // 绘制连线（对应 drawView.addLine，CustomLayout.java 第1677-1681行）
-        if (g_draw_sphere_line) {
+        // 判断是否是我方球体（坐标接近中心）
+        bool isMe = (fabs(e.x - myX) < 0.01f && fabs(e.y - myY) < 0.01f);
+
+        // 绘制连线（从我方球体到该球体）
+        if (g_draw_sphere_line && !isMe) {
             bg->AddLine(
                 ImVec2(startX, startY),
                 ImVec2(screenX, screenY),
-                sphere_color, 3.0f
+                sphere_color, 2.0f
             );
         }
 
-        // 绘制球体圆圈（对应 drawView.addCircle，Style=STROKE）
+        // 绘制球体圆圈
         if (g_draw_sphere_circle) {
+            ImU32 color = isMe ? my_color : sphere_color;
             bg->AddCircle(
                 ImVec2(screenX, screenY),
                 drawRadius,
-                sphere_color, 48, 3.0f
+                color, 48, 3.0f
             );
         }
     }
@@ -1868,16 +1881,14 @@ void render_window() {
                     ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3, 1.5, "%.1f"); // 世界绘图大小
                     ImGui::Separator();
                     if (ImGui::Button("\xe7\xbb\x98\xe5\x88\xb6\xe7\x90\x83\xe4\xbd\x93", ImVec2(-1, 50))) {
-                        // 绘制球体：点击切换开关，启动/停止内存读取线程
+                        // 绘制球体：点击切换开关，启动/停止 IL2CPP 数据读取线程
                         g_draw_sphere_enabled = !g_draw_sphere_enabled;
                         if (g_draw_sphere_enabled) {
-                            // 启动后台内存读取线程
+                            // 启动后台数据读取线程
                             if (g_sphere_thread.joinable()) g_sphere_thread.join();
-                            g_sphere_search_done = false;
+                            g_il2cpp_sphere_inited = false;
                             g_sphere_searching = false;
                             g_sphere_search_failed = false;
-                            g_a3 = 0;
-                            g_a5 = 0;
                             g_sphere_count = 0;
                             g_sphere_thread = std::thread(UpdateSpheresThread);
                         }
