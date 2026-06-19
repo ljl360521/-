@@ -47,6 +47,20 @@ int Prevent = 0;
 float window_opacity = 0.85f;  // 窗口透明度（0=全透明, 1=不透明）
 
 // ============================================================================
+// 绘制球体功能（移植自球球大作战 DrawView.java + CustomLayout.java）
+// 坐标转换公式: screenX = ((entity.x - offsetX) * 23.25f * 比例 * (23.25f * 比例 / 视图比例)) + startX
+// ============================================================================
+static bool g_draw_sphere_enabled = false;       // 绘制球体开关
+static bool g_draw_sphere_line = true;           // 绘制连线
+static bool g_draw_sphere_circle = true;         // 绘制圆球
+static float g_sphere_scale = 1.0f;              // 比例（parameters.比例）
+static float g_sphere_view_scale = 23.25f;       // 视图比例（memory.readFloat(a3 - 0x38)）
+static float g_sphere_offset_x = 0.0f;           // 视图偏移X（memory.readFloat(a3 - 100)）
+static float g_sphere_offset_y = 100.0f;         // 视图偏移Y（200 - memory.readFloat(a3 - 96)）
+static int g_sphere_color = 0;                   // 球体颜色 (0=白 1=黄 2=橙 3=红)
+static float g_sphere_time = 0.0f;               // 演示动画时间
+
+// ============================================================================
 // 游戏功能 stub（原版 MainDefinition.h 第889行起 + gjc.h）
 // 本项目无对应游戏功能，提供空实现以保持 UI 与原版一致
 // ============================================================================
@@ -1219,9 +1233,105 @@ void render_dynamic_island() {
 }
 
 // ============================================================================
+// DrawSpheres - 绘制球体（移植自球球大作战 DrawView.java + CustomLayout.java）
+// 使用 ImGui BackgroundDrawList 在游戏画面上层绘制球体圆环与连线
+// 坐标转换公式来源: CustomLayout.java 第1662-1672行 绘制玩家线段()
+//   screenX = ((entity.x - offsetX) * 23.25f * 比例 * (23.25f * 比例 / 视图比例)) + startX
+//   drawRadius = entity.radius * 23.25f * 比例 * (23.25f * 比例 / 视图比例)
+// ============================================================================
+struct SphereEntity {
+    float x;        // 世界坐标 X
+    float y;        // 世界坐标 Y
+    float radius;   // 球体半径
+    int rankId;     // 组ID
+};
+
+static void DrawSpheres() {
+    if (!g_draw_sphere_enabled) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+
+    // 屏幕中心（对应 parameters.分辨率x/2, 分辨率y/2）
+    float startX = io.DisplaySize.x * 0.5f;
+    float startY = io.DisplaySize.y * 0.5f;
+
+    // 坐标转换系数（对应 CustomLayout.java 第1662-1672行）
+    float k = 23.25f * g_sphere_scale;
+    float view_k = k * (k / g_sphere_view_scale);
+
+    // 颜色表（对应 CustomLayout.java 中的 Color.parseColor）
+    ImU32 colors[] = {
+        IM_COL32(255, 255, 255, 255),  // #FFFFFF 白
+        IM_COL32(255, 255, 51, 255),   // #FFFF33 黄
+        IM_COL32(255, 160, 122, 255),  // #FFA07A 橙
+        IM_COL32(255, 69, 0, 255),     // #FF4500 红
+    };
+    ImU32 sphere_color = colors[g_sphere_color & 3];
+
+    // 演示数据：模拟球球大作战中的球体（无真实内存读取时使用）
+    // 真实环境下应从 memory.readFloat(playerBaseAddr + 0x28) 读取半径
+    //                  从 memory.readFloat(coordAddr + 0x80) 读取 x
+    //                  从 200 - memory.readFloat(coordAddr + 0x84) 读取 y
+    g_sphere_time += io.DeltaTime;
+    SphereEntity demo_spheres[6];
+    for (int i = 0; i < 6; i++) {
+        float angle = g_sphere_time * 0.5f + i * (3.14159265f * 2.0f / 6.0f);
+        float dist = 80.0f + 20.0f * sinf(g_sphere_time + i);
+        demo_spheres[i].x = g_sphere_offset_x + cosf(angle) * dist;
+        demo_spheres[i].y = g_sphere_offset_y + sinf(angle) * dist;
+        demo_spheres[i].radius = 15.0f + 8.0f * sinf(g_sphere_time * 2.0f + i);
+        demo_spheres[i].rankId = i;
+    }
+
+    // 遍历球体绘制（对应 CustomLayout.java 第1661-1700行）
+    for (int i = 0; i < 6; i++) {
+        const SphereEntity& e = demo_spheres[i];
+
+        // 世界坐标 -> 屏幕坐标
+        // 公式: ((coord - offset) * 23.25 * 比例 * (23.25 * 比例 / 视图比例)) + start
+        float screenX = ((e.x - g_sphere_offset_x) * view_k) + startX;
+        float screenY = ((e.y - g_sphere_offset_y) * view_k) + startY;
+        float drawRadius = e.radius * view_k;
+        if (drawRadius < 2.0f) drawRadius = 2.0f;
+        if (drawRadius > 300.0f) drawRadius = 300.0f;
+
+        // 绘制连线（对应 drawView.addLine）
+        if (g_draw_sphere_line) {
+            bg->AddLine(
+                ImVec2(startX, startY),
+                ImVec2(screenX, screenY),
+                sphere_color, 3.0f
+            );
+        }
+
+        // 绘制圆球（对应 drawView.addCircle，Style=STROKE）
+        if (g_draw_sphere_circle) {
+            bg->AddCircle(
+                ImVec2(screenX, screenY),
+                drawRadius,
+                sphere_color, 48, 3.0f
+            );
+            // 内部半透明填充，增强视觉效果
+            bg->AddCircleFilled(
+                ImVec2(screenX, screenY),
+                drawRadius * 0.3f,
+                (sphere_color & 0x00FFFFFF) | 0x40000000, 16
+            );
+        }
+    }
+
+    // 中心点（我方球体位置）
+    bg->AddCircleFilled(ImVec2(startX, startY), 5.0f, IM_COL32(0, 255, 0, 255), 16);
+}
+
+// ============================================================================
 // render_window（原版 MainUI.h 第1-270行，严格逐行移植）
 // ============================================================================
 void render_window() {
+    // 绘制球体（独立于菜单，始终绘制）
+    DrawSpheres();
+
     // === 菜单展开动画（MainUI.h 第1-19行）===
     if (MainAuraOne) {
         if (!last_menu_state) {
@@ -1505,7 +1615,10 @@ void render_window() {
                     ImGui::Separator();
                     ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3, 1.5, "%.1f"); // 世界绘图大小
                     ImGui::Separator();
-                    if (ImGui::Button("\xe4\xbf\x9d\xe5\xad\x98\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 保存配置
+                    if (ImGui::Button("\xe7\xbb\x98\xe5\x88\xb6\xe7\x90\x83\xe4\xbd\x93", ImVec2(-1, 50))) {
+                        // 绘制球体：点击切换开关
+                        g_draw_sphere_enabled = !g_draw_sphere_enabled;
+                    } // 绘制球体
                     ImGui::Separator();
                     if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 加载配置
                 }
