@@ -12,6 +12,7 @@
 #include "ImGuiDraw.h"
 #include "native_register_vk.h"
 #include "logger.h"
+#include "KittyMemory.h"
 
 #include <cstdio>
 #include <cstring>
@@ -23,6 +24,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/sysinfo.h>
+#include <vector>
+#include <algorithm>
 
 namespace aura_ui {
 
@@ -47,7 +50,8 @@ int Prevent = 0;
 float window_opacity = 0.85f;  // 窗口透明度（0=全透明, 1=不透明）
 
 // ============================================================================
-// 绘制球体功能（移植自球球大作战 DrawView.java + CustomLayout.java）
+// 绘制球体功能（移植自球球大作战 DrawView.java + CustomLayout.java + Memory.java）
+// 使用 KittyMemory 进行真实内存读写
 // 坐标转换公式: screenX = ((entity.x - offsetX) * 23.25f * 比例 * (23.25f * 比例 / 视图比例)) + startX
 // ============================================================================
 
@@ -61,23 +65,239 @@ struct SphereEntity {
 
 #define MAX_SPHERES 64
 
+// ---- 内存读取函数（对应 Memory.java 的 readFloat/readDword/pointerJump）----
+// 使用 KittyMemory::safeMemRead 安全读取，避免崩溃
+
+static float mem_readFloat(uintptr_t addr) {
+    float val = 0.0f;
+    if (!KittyMemory::isAddressReadable(addr)) return val;
+    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(float));
+    return val;
+}
+
+static int mem_readDword(uintptr_t addr) {
+    int val = 0;
+    if (!KittyMemory::isAddressReadable(addr)) return val;
+    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(int));
+    return val;
+}
+
+static uintptr_t mem_readPtr(uintptr_t addr) {
+    uintptr_t val = 0;
+    if (!KittyMemory::isAddressReadable(addr)) return val;
+    KittyMemory::safeMemRead(&val, (const void*)addr, sizeof(uintptr_t));
+    return val;
+}
+
+// 指针跳转（对应 Memory.java pointerJump）
+// base + offsets[0] -> ptr, ptr + offsets[1] -> ptr2, ... 返回最终指针
+static uintptr_t mem_pointerJump(uintptr_t base, const long offsets[], int count) {
+    uintptr_t ptr = base;
+    for (int i = 0; i < count && ptr != 0; i++) {
+        ptr = mem_readPtr(ptr + offsets[i]);
+        if (ptr == 0) return 0;
+    }
+    return ptr;
+}
+
+// ---- 内存搜索（对应 Memory.java RangeMemorySearch + MemoryOffset）----
+// 搜索匿名内存中的指定值
+
+// 搜索 DWORD 值，返回所有匹配地址
+static std::vector<uintptr_t> mem_searchDword(int targetValue) {
+    std::vector<uintptr_t> results;
+    auto maps = KittyMemory::getAllMaps();
+    for (const auto& map : maps) {
+        if (!map.isReadable()) continue;
+        // 只搜索匿名内存（对应 RANGE_ANONYMOUS）
+        if (!map.pathname.empty() && map.pathname[0] == '/') continue;
+        
+        uintptr_t start = (uintptr_t)map.startAddr;
+        uintptr_t end = (uintptr_t)map.endAddr;
+        size_t len = map.length;
+        
+        // 读取整块内存
+        std::vector<char> buf(len);
+        if (KittyMemory::safeMemRead(buf.data(), (const void*)start, len) != KittyMemory::SUCCESS)
+            continue;
+        
+        // 搜索 DWORD
+        for (size_t i = 0; i + sizeof(int) <= len; i += 4) {
+            int val = *(int*)(buf.data() + i);
+            if (val == targetValue) {
+                results.push_back(start + i);
+            }
+        }
+    }
+    return results;
+}
+
+// 搜索 FLOAT 值，返回所有匹配地址
+static std::vector<uintptr_t> mem_searchFloat(float targetValue) {
+    std::vector<uintptr_t> results;
+    auto maps = KittyMemory::getAllMaps();
+    for (const auto& map : maps) {
+        if (!map.isReadable()) continue;
+        if (!map.pathname.empty() && map.pathname[0] == '/') continue;
+        
+        uintptr_t start = (uintptr_t)map.startAddr;
+        size_t len = map.length;
+        
+        std::vector<char> buf(len);
+        if (KittyMemory::safeMemRead(buf.data(), (const void*)start, len) != KittyMemory::SUCCESS)
+            continue;
+        
+        for (size_t i = 0; i + sizeof(float) <= len; i += 4) {
+            float val = *(float*)(buf.data() + i);
+            if (val == targetValue) {
+                results.push_back(start + i);
+            }
+        }
+    }
+    return results;
+}
+
+// ---- 球体绘制全局变量 ----
 static bool g_draw_sphere_enabled = false;       // 绘制球体开关
 static bool g_draw_sphere_line = true;           // 绘制连线（drawView.addLine）
 static bool g_draw_sphere_circle = true;         // 绘制圆球（drawView.addCircle）
 static float g_sphere_scale = 1.0f;              // 比例（parameters.比例）
-static float g_sphere_view_scale = 23.25f;       // 视图比例（memory.readFloat(a3 - 0x38)）
-static float g_sphere_offset_x = 0.0f;           // 视图偏移X（memory.readFloat(a3 - 100)）
-static float g_sphere_offset_y = 100.0f;         // 视图偏移Y（200 - memory.readFloat(a3 - 96)）
-static int g_sphere_color = 0;                   // 球体颜色 (0=白 1=黄 2=橙 3=红)
 
-// 球体列表（对应 rankToPlayers，真实环境下从内存读取填充）
-// 真实环境: CustomLayout.java 第1451行 获取玩家结构体()
-//   玩家结构体指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
-//   半径: readFloat(playerBaseAddr + 0x28)
-//   坐标: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
-//         x = readFloat(coordAddr + 0x80), y = 200 - readFloat(coordAddr + 0x84)
-static SphereEntity g_sphere_list[MAX_SPHERES];  // 球体数组
-static int g_sphere_count = 0;                   // 球体数量
+// 内存地址（对应 CustomLayout.java 中的 a3 和 a5）
+static uintptr_t g_a3 = 0;                       // 视图偏移地址
+static uintptr_t g_a5 = 0;                       // 玩家数组地址
+
+// 球体列表（对应 rankToPlayers）
+static SphereEntity g_sphere_list[MAX_SPHERES];
+static int g_sphere_count = 0;
+static std::atomic<bool> g_sphere_updating{false};
+static std::atomic<bool> g_sphere_search_done{false};
+static std::thread g_sphere_thread;
+
+// 我方球体屏幕位置（从内存读取计算，不再用屏幕中心）
+static float g_my_sphere_screen_x = 0.0f;
+static float g_my_sphere_screen_y = 0.0f;
+static bool g_my_sphere_valid = false;
+
+// ---- 内存搜索 a3 和 a5（对应 CustomLayout.java 第942-973行）----
+static void SearchMemoryAddresses() {
+    if (g_sphere_search_done) return;
+    g_sphere_search_done = true;
+    
+    // 搜索 a5: 搜索 "2333" DWORD，偏移 -1 at +12 和 +36，过滤 readFloat(addr+96)==0.0f
+    // (对应 CustomLayout.java 第949-962行)
+    auto dwordResults = mem_searchDword(2333);
+    for (uintptr_t addr : dwordResults) {
+        // 偏移 -1 at +12 和 +36
+        if (mem_readDword(addr + 12) == -1 && mem_readDword(addr + 36) == -1) {
+            if (mem_readFloat(addr + 96) == 0.0f) {
+                g_a5 = addr;
+                break;
+            }
+        }
+    }
+    
+    // 搜索 a3: 搜索 "14.5" FLOAT，偏移 "800" at -104
+    // (对应 CustomLayout.java 第966-972行)
+    auto floatResults = mem_searchFloat(14.5f);
+    for (uintptr_t addr : floatResults) {
+        if (mem_readFloat(addr - 104) == 800.0f) {
+            g_a3 = addr;
+            break;
+        }
+    }
+}
+
+// ---- 获取玩家结构体（对应 CustomLayout.java 第1451行 获取玩家结构体()）----
+// 后台线程持续读取内存，更新 g_sphere_list
+static void UpdateSpheresThread() {
+    while (g_draw_sphere_enabled) {
+        if (g_a3 == 0 || g_a5 == 0) {
+            SearchMemoryAddresses();
+            if (g_a3 == 0 || g_a5 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+        }
+        
+        // 读取视图偏移（对应 CustomLayout.java 第1652-1653行）
+        float offsetX = mem_readFloat(g_a3 - 100);
+        float offsetY = 200.0f - mem_readFloat(g_a3 - 96);
+        float viewScale = mem_readFloat(g_a3 - 0x38);
+        if (viewScale <= 0.0f) viewScale = 23.25f;
+        
+        SphereEntity local_list[MAX_SPHERES];
+        int local_count = 0;
+        
+        // 遍历玩家数组（对应 CustomLayout.java 第1469-1547行）
+        // 每个玩家 0x18 字节，指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
+        for (int i = 0; i < 512 && local_count < MAX_SPHERES; i++) {
+            long offsets[] = {0x18, 0x0};
+            uintptr_t playerBaseAddr = mem_pointerJump(g_a5 + i * 0x18, offsets, 2);
+            if (playerBaseAddr == 0) continue;
+            
+            // 验证玩家（对应 readDword(playerBaseAddr + 0x20) == 1）
+            if (mem_readDword(playerBaseAddr + 0x20) != 1) continue;
+            
+            // 读取半径（对应 readFloat(playerBaseAddr + 0x28)）
+            float radius = mem_readFloat(playerBaseAddr + 0x28);
+            if (radius <= 0.0f) continue;
+            
+            // 读取坐标（对应 CustomLayout.java 第1501-1509行）
+            // 指针链: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
+            long coordOffsets[] = {0x18, 0x0};
+            uintptr_t coordAddr = mem_pointerJump(playerBaseAddr, coordOffsets, 2);
+            if (coordAddr == 0) continue;
+            
+            float x = mem_readFloat(coordAddr + 0x80);
+            float y = 200.0f - mem_readFloat(coordAddr + 0x84);
+            
+            // 读取 rankId（对应 CustomLayout.java 第1511-1522行）
+            // 指针链: [coordAddr] → [0x30] → [0x0] → rankAddr
+            long rankOffsets[] = {0x30, 0x0};
+            uintptr_t rankAddr = mem_pointerJump(coordAddr, rankOffsets, 2);
+            int rankId = 0;
+            if (rankAddr != 0) {
+                rankId = mem_readDword(rankAddr + 0x10);
+            }
+            
+            local_list[local_count].x = x;
+            local_list[local_count].y = y;
+            local_list[local_count].radius = radius;
+            local_list[local_count].rankId = rankId;
+            local_count++;
+        }
+        
+        // 更新全局球体列表
+        memcpy(g_sphere_list, local_list, sizeof(SphereEntity) * local_count);
+        g_sphere_count = local_count;
+        
+        // 计算我方球体屏幕位置（最大的球体或第一个球体）
+        // 在球球大作战中，相机跟随我方球体，所以我方球体在屏幕中心
+        // 但我们从内存读取我方球体的世界坐标，通过坐标转换得到屏幕位置
+        if (local_count > 0) {
+            // 找最大的球体作为我方球体
+            int maxIdx = 0;
+            float maxRadius = local_list[0].radius;
+            for (int i = 1; i < local_count; i++) {
+                if (local_list[i].radius > maxRadius) {
+                    maxRadius = local_list[i].radius;
+                    maxIdx = i;
+                }
+            }
+            // 我方球体的世界坐标就是视图中心，转换后应该在屏幕中心附近
+            // 但我们用 offsetX/Y 作为我方球体位置（因为相机跟随）
+            g_my_sphere_screen_x = 0.0f;  // 相对偏移为0，即在屏幕中心
+            g_my_sphere_screen_y = 0.0f;
+            g_my_sphere_valid = true;
+        } else {
+            g_my_sphere_valid = false;
+        }
+        
+        // 刷新延时（对应 CustomLayout.java 刷新延时=8）
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+}
 
 // ============================================================================
 // 游戏功能 stub（原版 MainDefinition.h 第889行起 + gjc.h）
@@ -1254,14 +1474,8 @@ void render_dynamic_island() {
 // ============================================================================
 // DrawSpheres - 绘制球体（移植自球球大作战 DrawView.java + CustomLayout.java）
 // 使用 ImGui BackgroundDrawList 在游戏画面上层绘制所有球体
+// 数据来源: UpdateSpheresThread() 从内存读取的真实球体数据
 // 逻辑来源: CustomLayout.java 第1634-1700行 绘制玩家线段()
-//   遍历 rankToPlayers 中所有球体，对每个球体：
-//     1. 世界坐标 -> 屏幕坐标
-//        screenX = ((entity.x - offsetX) * 23.25 * 比例 * (23.25 * 比例 / 视图比例)) + startX
-//        screenY = ((entity.y - offsetY) * 23.25 * 比例 * (23.25 * 比例 / 视图比例)) + startY
-//     2. drawRadius = entity.radius * 23.25 * 比例 * (23.25 * 比例 / 视图比例)
-//     3. drawView.addLine(startX, startY, screenX, screenY, ...)  // 中心到球体的连线
-//     4. drawView.addCircle(screenX, screenY, drawRadius, ...)    // 球体圆圈
 // ============================================================================
 
 static void DrawSpheres() {
@@ -1271,72 +1485,45 @@ static void DrawSpheres() {
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
     // 屏幕中心 = 我方球体位置（对应 parameters.分辨率x/2, 分辨率y/2）
+    // 在球球大作战中，相机跟随我方球体，所以我方球体在屏幕中心
     float startX = io.DisplaySize.x * 0.5f;
     float startY = io.DisplaySize.y * 0.5f;
 
-    // 视图偏移（对应 CustomLayout.java 第1652-1653行）
+    // 如果没有内存数据，显示提示文字
+    if (g_sphere_count == 0) {
+        bg->AddText(ImVec2(startX - 100, startY - 20),
+            IM_COL32(255, 255, 0, 255),
+            "\xe6\xad\xa3\xe5\x9c\xa8\xe6\x90\x9c\xe7\xb4\xa2\xe5\x86\x85\xe5\xad\x98..."); // 正在搜索内存...
+        return;
+    }
+
+    // 读取视图偏移和视图比例（对应 CustomLayout.java 第1652-1653行）
     // offsetX = memory.readFloat(a3 - 100)
     // offsetY = 200 - memory.readFloat(a3 - 96)
-    float offsetX = g_sphere_offset_x;
-    float offsetY = g_sphere_offset_y;
+    // 视图比例 = memory.readFloat(a3 - 0x38)
+    float offsetX = 0.0f, offsetY = 100.0f, viewScale = 23.25f;
+    if (g_a3 != 0) {
+        offsetX = mem_readFloat(g_a3 - 100);
+        offsetY = 200.0f - mem_readFloat(g_a3 - 96);
+        viewScale = mem_readFloat(g_a3 - 0x38);
+        if (viewScale <= 0.0f) viewScale = 23.25f;
+    }
 
     // 坐标转换系数（对应 CustomLayout.java 第1662-1672行）
     // k = 23.25 * 比例
     // view_k = k * (k / 视图比例) = 23.25 * 比例 * (23.25 * 比例 / 视图比例)
     float k = 23.25f * g_sphere_scale;
-    float view_k = k * (k / g_sphere_view_scale);
+    float view_k = k * (k / viewScale);
 
-    // 颜色表（对应 CustomLayout.java 中的 Color.parseColor）
-    ImU32 colors[] = {
-        IM_COL32(255, 255, 255, 255),  // #FFFFFF 白（普通球体）
-        IM_COL32(255, 255, 51, 255),   // #FFFF33 黄（选中球体）
-        IM_COL32(255, 160, 122, 255),  // #FFA07A 橙（旋转卡点）
-        IM_COL32(255, 69, 0, 255),     // #FF4500 红（蛇手卡点）
-    };
-    ImU32 sphere_color = colors[g_sphere_color & 3];
-
-    // 球体列表（对应 rankToPlayers 中的所有球体）
-    // 真实环境下从内存读取（CustomLayout.java 第1451行 获取玩家结构体()）
-    //   玩家结构体指针链: [数组+i*0x18] → [0x18] → [0x0] → playerBaseAddr
-    //   半径: readFloat(playerBaseAddr + 0x28)
-    //   坐标: [playerBaseAddr] → [0x18] → [0x0] → coordAddr
-    //         x = readFloat(coordAddr + 0x80)
-    //         y = 200 - readFloat(coordAddr + 0x84)
-    //
-    // 当无真实内存数据时（g_sphere_count == 0），使用演示球体数据
-    // 演示球体为静态位置（不旋转），模拟球球大作战中的多个球体
-    SphereEntity demo_list[8];
-    int draw_count;
-    SphereEntity* draw_list;
-    if (g_sphere_count > 0) {
-        draw_count = g_sphere_count;
-        draw_list = g_sphere_list;
-    } else {
-        // 演示球体：分布在世界坐标不同位置（相对 offsetX/Y 偏移）
-        // 这样转换后会分布在屏幕中心周围，模拟真实游戏场景
-        float demo_offsets[8][3] = {
-            {  5.0f,   3.0f, 12.0f},  // 右下
-            { -8.0f,   6.0f, 18.0f},  // 左下
-            { 12.0f,  -4.0f,  8.0f},  // 右上
-            { -6.0f,  -7.0f, 15.0f},  // 左上
-            { 15.0f,   8.0f, 20.0f},  // 远右下
-            {-14.0f,  10.0f, 10.0f},  // 远左下
-            {  3.0f, -12.0f, 14.0f},  // 上方
-            { -3.0f,   2.0f, 25.0f},  // 近距离大球
-        };
-        for (int i = 0; i < 8; i++) {
-            demo_list[i].x = offsetX + demo_offsets[i][0];
-            demo_list[i].y = offsetY + demo_offsets[i][1];
-            demo_list[i].radius = demo_offsets[i][2];
-            demo_list[i].rankId = i;
-        }
-        draw_count = 8;
-        draw_list = demo_list;
-    }
+    // 颜色（对应 CustomLayout.java 中的 Color.parseColor("#FFFFFF")）
+    ImU32 sphere_color = IM_COL32(255, 255, 255, 255);  // 白色
 
     // 遍历所有球体绘制（对应 CustomLayout.java 第1656-1700行 遍历 rankToPlayers）
-    for (int i = 0; i < draw_count && i < MAX_SPHERES; i++) {
-        const SphereEntity& e = draw_list[i];
+    int count = g_sphere_count;
+    if (count > MAX_SPHERES) count = MAX_SPHERES;
+
+    for (int i = 0; i < count; i++) {
+        const SphereEntity& e = g_sphere_list[i];
 
         // 世界坐标 -> 屏幕坐标（CustomLayout.java 第1662-1669行）
         float screenX = ((e.x - offsetX) * view_k) + startX;
@@ -1659,13 +1846,20 @@ void render_window() {
                     ImGui::SliderFloat("\xe4\xb8\x96\xe7\x95\x8c\xe7\xbb\x98\xe5\x9b\xbe\xe5\xa4\xa7\xe5\xb0\x8f", &ImGuiDrawESP2, 0.3, 1.5, "%.1f"); // 世界绘图大小
                     ImGui::Separator();
                     if (ImGui::Button("\xe7\xbb\x98\xe5\x88\xb6\xe7\x90\x83\xe4\xbd\x93", ImVec2(-1, 50))) {
-                        // 绘制球体：点击切换开关
+                        // 绘制球体：点击切换开关，启动/停止内存读取线程
                         g_draw_sphere_enabled = !g_draw_sphere_enabled;
+                        if (g_draw_sphere_enabled) {
+                            // 启动后台内存读取线程
+                            if (g_sphere_thread.joinable()) g_sphere_thread.join();
+                            g_sphere_search_done = false;
+                            g_a3 = 0;
+                            g_a5 = 0;
+                            g_sphere_count = 0;
+                            g_sphere_thread = std::thread(UpdateSpheresThread);
+                        }
                     } // 绘制球体
                     ImGui::Separator();
                     ImGui::SliderFloat("\xe7\x90\x83\xe4\xbd\x93\xe6\xaf\x94\xe4\xbe\x8b", &g_sphere_scale, 0.3f, 3.0f, "%.2f"); // 球体比例
-                    ImGui::Separator();
-                    ImGui::SliderFloat("\xe8\xa7\x86\xe5\x9b\xbe\xe6\xaf\x94\xe4\xbe\x8b", &g_sphere_view_scale, 1.0f, 100.0f, "%.2f"); // 视图比例
                     ImGui::Separator();
                     if (ImGui::Button("\xe5\x8a\xa0\xe8\xbd\xbd\xe9\x85\x8d\xe7\xbd\xae", ImVec2(-1, 50))) { } // 加载配置
                 }
