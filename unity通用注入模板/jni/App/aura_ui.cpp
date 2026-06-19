@@ -53,6 +53,21 @@ std::atomic<bool> lb_game_running{false};
 std::atomic<bool> lb_game_ready{false};
 static unsigned long lb_base_libUE4 = 0;
 
+// 获取注入软件的包名（从 /proc/self/cmdline 读取，即当前进程名）
+static std::string get_injected_package_name() {
+    static std::string cached_name;
+    if (!cached_name.empty()) return cached_name;
+    int fd = open("/proc/self/cmdline", O_RDONLY);
+    if (fd >= 0) {
+        char buf[256] = {0};
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) cached_name = std::string(buf);
+    }
+    if (cached_name.empty()) cached_name = "unknown";
+    return cached_name;
+}
+
 std::atomic<bool> lb_feature_luna{false};
 std::atomic<bool> lb_feature_head{false};
 std::atomic<bool> lb_feature_body{false};
@@ -1258,7 +1273,7 @@ void render_window() {
                     ImGui::TextColored(lb_gjc_injected ? ImVec4(0.1f,0.7f,0.1f,1) : ImVec4(0.8f,0.3f,0,1),
                         "\xe8\xbf\x87\xe6\xa3\x80\xe6\xb5\x8b: %s", lb_gjc_status.c_str()); // 过检测
                     ImGui::Separator();
-                    ImGui::Text("\xe6\xb8\xb8\xe6\x88\x8f\xe8\xbf\x9b\xe7\xa8\x8b: %s", lb_game_running ? "\xe6\xad\xa3\xe5\xb8\xb8" : "\xe6\x9c\xaa\xe5\xb0\xb1\xe7\xbb\xaa"); // 游戏进程: 正常/未就绪
+                    ImGui::Text("\xe6\xb3\xa8\xe5\x85\xa5\xe5\x8c\x85\xe5\x90\x8d: %s", get_injected_package_name().c_str()); // 注入包名: com.ztgame.bob
                     ImGui::Text("\xe5\x9f\xba\xe5\x9d\x80\xe7\x8a\xb6\xe6\x80\x81: %s", lb_base_libUE4 ? "\xe5\xb7\xb2\xe8\x8e\xb7\xe5\x8f\x96" : "\xe6\x9c\xaa\xe8\x8e\xb7\xe5\x8f\x96"); // 基址状态: 已获取/未获取
                 }
                 EndGlassCard();
