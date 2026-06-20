@@ -61,8 +61,10 @@ bool il2cpp_api_init() {
     p_il2cpp_resolve_icall = resolve_sym<il2cpp_resolve_icall_t>("il2cpp_resolve_icall");
     p_il2cpp_assembly_get_image = resolve_sym<il2cpp_assembly_get_image_t>("il2cpp_assembly_get_image");
 
-    if (!p_il2cpp_domain_get || !p_il2cpp_class_from_name || !p_il2cpp_class_get_field_from_name) {
-        LOGE("il2cpp_api: 解析核心符号失败");
+    if (!p_il2cpp_domain_get || !p_il2cpp_class_from_name || !p_il2cpp_class_get_field_from_name || !p_il2cpp_assembly_get_image) {
+        LOGE("il2cpp_api: 解析核心符号失败 (domain=%p class_from_name=%p get_field=%p get_image=%p)",
+             (void*)p_il2cpp_domain_get, (void*)p_il2cpp_class_from_name,
+             (void*)p_il2cpp_class_get_field_from_name, (void*)p_il2cpp_assembly_get_image);
         return false;
     }
 

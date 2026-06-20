@@ -97,6 +97,8 @@ static int g_sphere_count = 0;
 static std::atomic<bool> g_sphere_searching{false};
 static std::atomic<bool> g_sphere_search_failed{false};
 static std::thread g_sphere_thread;
+// 当前状态文本（用于 UI 显示，让用户看到具体卡在哪一步）
+static std::string g_sphere_status;
 
 // 我方球体世界坐标（用于坐标转换中心点）
 static float g_my_sphere_world_x = 0.0f;
@@ -106,32 +108,39 @@ static bool g_my_sphere_valid = false;
 // 初始化 IL2CPP 字段偏移
 static bool InitSphereIl2cppOffsets() {
     if (g_il2cpp_sphere_inited) return true;
+
+    g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP API..."; // 正在初始化 IL2CPP API...
     if (!il2cpp_api_init()) {
+        g_sphere_status = "IL2CPP API \xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x88\xe6\x9c\xaa\xe5\x8a\xa0\xe8\xbd\xbd libil2cpp.so\xef\xbc\x89"; // IL2CPP API 初始化失败（未加载 libil2cpp.so）
         g_sphere_search_failed = true;
         return false;
     }
 
     // 查找 GameCoreCenter 类（无命名空间）
+    g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe6\x9f\xa5\xe6\x89\xbe GameCoreCenter \xe7\xb1\xbb..."; // 正在查找 GameCoreCenter 类...
     g_class_GameCoreCenter = il2cpp_get_class("", "GameCoreCenter");
     if (!g_class_GameCoreCenter) {
+        g_sphere_status = "\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0 GameCoreCenter \xe7\xb1\xbb\xef\xbc\x88\xe6\xb8\xb8\xe6\x88\x8f\xe6\x9c\xaa\xe5\x90\xaf\xe5\x8a\xa8\xef\xbc\x9f\xef\xbc\x89"; // 找不到 GameCoreCenter 类（游戏未启动？）
         LOGE("SphereDraw: 找不到 GameCoreCenter 类");
         g_sphere_search_failed = true;
         return false;
     }
 
     // 查找 DrawCircle 类
+    g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe6\x9f\xa5\xe6\x89\xbe DrawCircle \xe7\xb1\xbb..."; // 正在查找 DrawCircle 类...
     g_class_DrawCircle = il2cpp_get_class("", "DrawCircle");
     if (!g_class_DrawCircle) {
+        g_sphere_status = "\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0 DrawCircle \xe7\xb1\xbb"; // 找不到 DrawCircle 类
         LOGE("SphereDraw: 找不到 DrawCircle 类");
         g_sphere_search_failed = true;
         return false;
     }
 
     // 获取字段偏移
-    // GameCoreCenter.instance 是静态字段，用 il2cpp_get_static_field_data 获取静态区
-    // BallDic 是实例字段
+    g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe8\x8e\xb7\xe5\x8f\x96\xe5\xad\x97\xe6\xae\xb5\xe5\x81\x8f\xe7\xa7\xbb..."; // 正在获取字段偏移...
     g_off_BallDic = il2cpp_get_field_offset(g_class_GameCoreCenter, "BallDic");
     if (g_off_BallDic == (size_t)-1) {
+        g_sphere_status = "\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0 GameCoreCenter.BallDic \xe5\xad\x97\xe6\xae\xb5"; // 找不到 GameCoreCenter.BallDic 字段
         LOGE("SphereDraw: 找不到 GameCoreCenter.BallDic 字段");
         g_sphere_search_failed = true;
         return false;
@@ -147,10 +156,10 @@ static bool InitSphereIl2cppOffsets() {
          g_off_BallDic, g_off_DC_Radius, g_off_DC_pos, g_off_DC_SelfTF);
 
     // 获取 Unity Transform.get_position icall
-    // 这个 icall 返回的是内部函数，签名: void get_position_Injected(Transform*, Vector3*)
     p_Transform_get_position = (Transform_get_position_t)il2cpp_get_icall("UnityEngine.Transform::get_position_Injected");
 
     g_il2cpp_sphere_inited = true;
+    g_sphere_status = "IL2CPP \xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe6\x88\x90\xe5\x8a\x9f"; // IL2CPP 初始化成功
     return true;
 }
 
@@ -212,38 +221,75 @@ static void UpdateSpheresThread() {
 
     // 持续读取球体数据
     while (g_draw_sphere_enabled) {
-        // 获取 GameCoreCenter.instance（静态字段）
+        g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe8\x8e\xb7\xe5\x8f\x96 GameCoreCenter \xe5\xae\x9e\xe4\xbe\x8b..."; // 正在获取 GameCoreCenter 实例...
+
+        // 获取 GameCoreCenter 的静态字段数据区
         void* static_data = il2cpp_get_static_field_data(g_class_GameCoreCenter);
         if (!static_data) {
+            g_sphere_status = "\xe6\x97\xa0\xe6\xb3\x95\xe8\x8e\xb7\xe5\x8f\x96\xe9\x9d\x99\xe6\x80\x81\xe5\xad\x97\xe6\xae\xb5\xe6\x95\xb0\xe6\x8d\xae\xe5\x8c\xba"; // 无法获取静态字段数据区
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
-        // instance 是 <instance>k__BackingField，需要找到它的偏移
-        // 静态字段在 static_data 中，偏移需要单独获取
-        // 这里用 il2cpp_get_static_field_value 获取 instance
-        void* instance = nullptr;
-        il2cpp_get_static_field_value(g_class_GameCoreCenter, "<instance>k__BackingField", &instance);
+        // 尝试多种字段名获取 instance 偏移
+        // C# 中可能是: public static GameCoreCenter instance;
+        // 或属性: public static GameCoreCenter instance { get; private set; } -> <instance>k__BackingField
+        static size_t off_instance = (size_t)-1;
+        if (off_instance == (size_t)-1) {
+            off_instance = il2cpp_get_field_offset(g_class_GameCoreCenter, "instance");
+            if (off_instance == (size_t)-1) {
+                off_instance = il2cpp_get_field_offset(g_class_GameCoreCenter, "<instance>k__BackingField");
+            }
+            if (off_instance == (size_t)-1) {
+                // 尝试其他可能的名称
+                off_instance = il2cpp_get_field_offset(g_class_GameCoreCenter, "Instance");
+            }
+            if (off_instance != (size_t)-1) {
+                LOGI("SphereDraw: instance 字段偏移=0x%zx", off_instance);
+            }
+        }
+        if (off_instance == (size_t)-1) {
+            g_sphere_status = "\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0 instance \xe5\xad\x97\xe6\xae\xb5"; // 找不到 instance 字段
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            continue;
+        }
+
+        // 从静态字段数据区读取 instance 指针
+        void* instance = *(void**)((char*)static_data + off_instance);
         if (!instance) {
+            g_sphere_status = "GameCoreCenter.instance \xe4\xb8\xba\xe7\xa9\xba\xef\xbc\x88\xe6\xb8\xb8\xe6\x88\x8f\xe6\x9c\xaa\xe5\xbc\x80\xe5\xa7\x8b\xef\xbc\x9f\xef\xbc\x89"; // GameCoreCenter.instance 为空（游戏未开始？）
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
+
+        g_sphere_status = "\xe6\xad\xa3\xe5\x9c\xa8\xe8\xaf\xbb\xe5\x8f\x96\xe7\x90\x83\xe4\xbd\x93\xe5\xad\x97\xe5\x85\xb8 BallDic..."; // 正在读取球体字典 BallDic...
 
         // 读取 BallDic（Dictionary<UInt32, DrawCircle>*）
         void* ballDic = il2cpp_read_ptr(instance, g_off_BallDic);
         if (!ballDic) {
+            g_sphere_status = "BallDic \xe4\xb8\xba\xe7\xa9\xba\xef\xbc\x88\xe6\xb8\xb8\xe6\x88\x8f\xe6\x9c\xaa\xe5\xbc\x80\xe5\xa7\x8b\xef\xbc\x9f\xef\xbc\x89"; // BallDic 为空（游戏未开始？）
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
-        // 获取 Dictionary 的 entries 和 count
-        // 尝试动态获取 entries 字段偏移
+        // 获取 Dictionary 的 entries 和 count 偏移
+        // 尝试多种字段名（Unity Mono 和 .NET Core 风格）
         if (g_off_Dict_entries == (size_t)-1) {
             Il2CppClass* dictClass = il2cpp_get_class("System.Collections.Generic", "Dictionary`2");
             if (dictClass) {
+                // 尝试 _entries (带下划线，.NET Core 风格)
                 g_off_Dict_entries = il2cpp_get_field_offset(dictClass, "_entries");
+                if (g_off_Dict_entries == (size_t)-1) {
+                    // 尝试 entries (不带下划线，Unity Mono 风格)
+                    g_off_Dict_entries = il2cpp_get_field_offset(dictClass, "entries");
+                }
                 g_off_Dict_count = il2cpp_get_field_offset(dictClass, "_count");
-                LOGI("SphereDraw: Dictionary _entries=0x%zx _count=0x%zx", g_off_Dict_entries, g_off_Dict_count);
+                if (g_off_Dict_count == (size_t)-1) {
+                    g_off_Dict_count = il2cpp_get_field_offset(dictClass, "count");
+                }
+                LOGI("SphereDraw: Dictionary entries=0x%zx count=0x%zx", g_off_Dict_entries, g_off_Dict_count);
+            } else {
+                LOGE("SphereDraw: 找不到 Dictionary`2 类");
             }
         }
 
@@ -258,22 +304,28 @@ static void UpdateSpheresThread() {
             if (count < 0) count = 0;
             if (count > 1024) count = 1024;
 
-            // 读取 entries 数组（IL2CPP 数组结构: [ptr, monitor, bounds(8), length(8), data...]）
+            // 读取 entries 数组
             void* entriesArr = il2cpp_read_ptr(ballDic, g_off_Dict_entries);
             if (entriesArr) {
-                // IL2CPP 数组: 偏移 0x18 是 length，0x20 开始是数据
-                // 但实际布局: Il2CppArray 头部 + bounds + max_length + data
-                // 简化: 假设偏移 0x18 是 length，0x20 开始是元素
+                // IL2CPP 数组结构 (64位):
+                //   Il2CppObject (16字节: vtable + monitor)
+                //   bounds (8字节)
+                //   max_length (8字节, 在偏移 0x18)
+                //   data[] (从偏移 0x20 开始)
                 int arrLen = il2cpp_read_field<int>(entriesArr, 0x18);
+                if (arrLen < 0) arrLen = 0;
                 if (arrLen > 1024) arrLen = 1024;
 
-                // Entry 结构: { int hashCode, int next, UInt32 key, padding, void* value }
-                // = 4 + 4 + 4 + 4 + 8 = 24 bytes (32位下可能不同)
-                // 但在 64 位下，指针是 8 字节，可能有对齐
-                // 假设 Entry: hashCode(4) + next(4) + key(4) + pad(4) + value(8) = 24
+                // Entry 结构 (Dictionary<UInt32, DrawCircle>):
+                //   int hashCode (4)
+                //   int next (4)
+                //   UInt32 key (4)
+                //   padding (4, 对齐到8字节)
+                //   DrawCircle* value (8)
+                // 总大小 24 字节, value 在偏移 16
                 const int ENTRY_SIZE = 24;
-                const int ENTRY_VALUE_OFFSET = 16;  // value 在 Entry 中的偏移
-                const int ENTRY_HASH_OFFSET = 0;    // hashCode 在 Entry 中的偏移
+                const int ENTRY_VALUE_OFFSET = 16;
+                const int ENTRY_HASH_OFFSET = 0;
 
                 for (int i = 0; i < arrLen && local_count < MAX_SPHERES; i++) {
                     char* entry = (char*)entriesArr + 0x20 + i * ENTRY_SIZE;
@@ -321,6 +373,16 @@ static void UpdateSpheresThread() {
         g_my_sphere_world_x = myPos.x;
         g_my_sphere_world_y = myPos.y;
         g_my_sphere_valid = (local_count > 0);
+
+        if (local_count == 0) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0\xe7\x90\x83\xe4\xbd\x93\xe6\x95\xb0\xe6\x8d\xae\xef\xbc\x88\xe6\xb8\xb8\xe6\x88\x8f\xe6\x9c\xaa\xe5\xbc\x80\xe5\xa7\x8b\xef\xbc\x9f\xef\xbc\x89"); // 未找到球体数据（游戏未开始？）
+            g_sphere_status = buf;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "\xe5\xb7\xb2\xe7\xbb\x98\xe5\x88\xb6 %d \xe4\xb8\xaa\xe7\x90\x83\xe4\xbd\x93", local_count); // 已绘制 N 个球体
+            g_sphere_status = buf;
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(16));  // ~60fps
     }
@@ -1517,19 +1579,24 @@ static void DrawSpheres() {
 
     // 如果初始化失败，显示错误提示（优先级最高）
     if (g_sphere_search_failed && g_sphere_count == 0) {
-        bg->AddText(ImVec2(startX - 140, startY - 20),
-            IM_COL32(255, 0, 0, 255),
-            "\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x8c\xe8\xaf\xb7\xe7\xa1\xae\xe8\xae\xa4\xe6\xb8\xb8\xe6\x88\x8f\xe5\xb7\xb2\xe5\xbc\x80\xe5\xa7\x8b"); // 初始化失败，请确认游戏已开始
+        const char* status = g_sphere_status.empty() ?
+            "\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe5\xa4\xb1\xe8\xb4\xa5" : // 初始化失败
+            g_sphere_status.c_str();
+        ImVec2 textSize = ImGui::CalcTextSize(status);
+        bg->AddText(ImVec2(startX - textSize.x * 0.5f, startY - 20),
+            IM_COL32(255, 0, 0, 255), status);
         return;
     }
 
-    // 如果正在初始化 IL2CPP，或者已启用但还没数据，显示提示
-    // 关键修复：线程启动有延迟，searching 标志可能还没被设置，
-    // 所以只要 enabled 且 count==0 且没失败，就显示"正在初始化"
+    // 如果正在初始化 IL2CPP，或者已启用但还没数据，显示当前状态
+    // 关键修复：显示 g_sphere_status 让用户看到具体卡在哪一步
     if (g_sphere_searching || g_sphere_count == 0) {
-        bg->AddText(ImVec2(startX - 100, startY - 20),
-            IM_COL32(255, 255, 0, 255),
-            "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP..."); // 正在初始化 IL2CPP...
+        const char* status = g_sphere_status.empty() ?
+            "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP..." : // 正在初始化 IL2CPP...
+            g_sphere_status.c_str();
+        ImVec2 textSize = ImGui::CalcTextSize(status);
+        bg->AddText(ImVec2(startX - textSize.x * 0.5f, startY - 20),
+            IM_COL32(255, 255, 0, 255), status);
         return;
     }
 
@@ -1891,6 +1958,7 @@ void render_window() {
                             g_sphere_searching = true;
                             g_sphere_search_failed = false;
                             g_sphere_count = 0;
+                            g_sphere_status.clear();
                             g_sphere_thread = std::thread(UpdateSpheresThread);
                         }
                     } // 绘制球体
