@@ -1515,15 +1515,7 @@ static void DrawSpheres() {
     float startX = io.DisplaySize.x * 0.5f;
     float startY = io.DisplaySize.y * 0.5f;
 
-    // 如果正在初始化 IL2CPP，显示提示
-    if (g_sphere_searching) {
-        bg->AddText(ImVec2(startX - 100, startY - 20),
-            IM_COL32(255, 255, 0, 255),
-            "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP..."); // 正在初始化 IL2CPP...
-        return;
-    }
-
-    // 如果初始化失败，显示错误提示
+    // 如果初始化失败，显示错误提示（优先级最高）
     if (g_sphere_search_failed && g_sphere_count == 0) {
         bg->AddText(ImVec2(startX - 140, startY - 20),
             IM_COL32(255, 0, 0, 255),
@@ -1531,8 +1523,15 @@ static void DrawSpheres() {
         return;
     }
 
-    // 如果没有球体数据，不绘制
-    if (g_sphere_count == 0) return;
+    // 如果正在初始化 IL2CPP，或者已启用但还没数据，显示提示
+    // 关键修复：线程启动有延迟，searching 标志可能还没被设置，
+    // 所以只要 enabled 且 count==0 且没失败，就显示"正在初始化"
+    if (g_sphere_searching || g_sphere_count == 0) {
+        bg->AddText(ImVec2(startX - 100, startY - 20),
+            IM_COL32(255, 255, 0, 255),
+            "\xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96 IL2CPP..."); // 正在初始化 IL2CPP...
+        return;
+    }
 
     // 坐标转换：用我方球体世界坐标作为屏幕中心
     // 其他球体相对我方球体的世界坐标差，乘以比例系数得到屏幕偏移
@@ -1887,7 +1886,9 @@ void render_window() {
                             // 启动后台数据读取线程
                             if (g_sphere_thread.joinable()) g_sphere_thread.join();
                             g_il2cpp_sphere_inited = false;
-                            g_sphere_searching = false;
+                            // 关键修复：立即设置 searching=true，避免线程启动延迟期间
+                            // DrawSpheres() 因 g_sphere_count==0 直接返回什么都不显示
+                            g_sphere_searching = true;
                             g_sphere_search_failed = false;
                             g_sphere_count = 0;
                             g_sphere_thread = std::thread(UpdateSpheresThread);
