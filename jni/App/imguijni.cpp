@@ -162,6 +162,15 @@ void DrawFloatingWindow() {
             ImGui::SameLine();
             ImGui::Text("对象数: %zu", esp.GetObjectCount());
 
+            // 诊断信息 (帮助排查"勾选没用"的问题)
+            if (ImGui::TreeNode("诊断信息")) {
+                ImGui::TextWrapped("状态: %s", esp.GetDiagStatus().c_str());
+                ImGui::Separator();
+                ImGui::TextDisabled("字段偏移 (供对照 logcat):");
+                ImGui::TextWrapped("%s", esp.GetDiagOffsets().c_str());
+                ImGui::TreePop();
+            }
+
             if (ImGui::TreeNode("绘制项")) {
                 ImGui::Checkbox("圆圈",   &cfg.show_circle);
                 ImGui::Checkbox("名称",   &cfg.show_name);

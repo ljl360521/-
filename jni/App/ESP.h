@@ -66,6 +66,10 @@ typedef const char*          (*il2cpp_string_to_utf8_t)(Il2CppString*);
 typedef Il2CppString*        (*il2cpp_string_new_t)(const char*);
 typedef const char*          (*il2cpp_class_get_name_t)(Il2CppClass*);
 typedef const char*          (*il2cpp_image_get_name_t)(Il2CppImage*);
+typedef void*                (*il2cpp_thread_attach_t)(Il2CppDomain*);
+typedef const Il2CppAssembly* (*il2cpp_domain_assembly_open_t)(const Il2CppDomain*, const char*);
+typedef size_t               (*il2cpp_image_get_class_count_t)(const Il2CppImage*);
+typedef Il2CppClass*         (*il2cpp_image_get_class_t)(const Il2CppImage*, size_t);
 
 // =============================================================================
 // 游戏对象信息 (对应 draw_circle.rs / data_reader.rs 的 GameObjectInfo)
@@ -222,6 +226,12 @@ public:
     // 获取对象数量
     size_t GetObjectCount() const { return m_objects.size(); }
 
+    // 诊断信息 (供 UI 显示, 帮助排查问题)
+    std::string m_diagStatus;   // 初始化状态描述
+    std::string m_diagOffsets;  // 字段偏移描述
+    const std::string& GetDiagStatus() const { return m_diagStatus; }
+    const std::string& GetDiagOffsets() const { return m_diagOffsets; }
+
     // 应用改名 (逆向: "rename_enabled", GameCoreCenter.Rename)
     void ApplyRename(const std::string& newName);
 
@@ -249,11 +259,17 @@ private:
     il2cpp_string_new_t              m_fn_string_new;
     il2cpp_class_get_name_t          m_fn_class_get_name;
     il2cpp_image_get_name_t          m_fn_image_get_name;
+    il2cpp_thread_attach_t           m_fn_thread_attach;
+    il2cpp_domain_assembly_open_t    m_fn_domain_assembly_open;
+    il2cpp_image_get_class_count_t   m_fn_image_get_class_count;
+    il2cpp_image_get_class_t         m_fn_image_get_class;
 
     // 缓存的游戏类
     Il2CppClass* m_classGameCoreCenter;
     Il2CppClass* m_classPlayerBase;
     Il2CppClass* m_classCamera;
+    Il2CppImage* m_imageCSharp;
+    Il2CppDomain* m_domain;
 
     // 缓存的方法
     MethodInfo* m_methodGetInstance;
@@ -265,6 +281,7 @@ private:
 
     // --- 游戏状态 ---
     std::atomic<bool> m_gameReady;
+    std::atomic<bool> m_threadAttached;
     std::atomic<uint32_t> m_counter;
     std::atomic<uint32_t> m_pcounter;
     Il2CppObject* m_gameInstance;
