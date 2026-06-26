@@ -7,6 +7,7 @@
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
 #include "zt_ttf.h"
+#include "ESP.h"
 #include <string>
 #include <vector>
 #include <cstring>
@@ -149,6 +150,67 @@ void DrawFloatingWindow() {
     ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("悬浮窗口", nullptr, windowFlags)) {
         g_window = ImGui::GetCurrentWindow();
+
+        // ===== ESP 透视控制面板 =====
+        ESPSystem& esp = ESPSystem::Instance();
+        ESPConfig& cfg = esp.config;
+
+        if (ImGui::CollapsingHeader("ESP 透视")) {
+            ImGui::Checkbox("总开关", &cfg.draw_enabled);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(游戏就绪: %s)", esp.IsGameReady() ? "是" : "否");
+            ImGui::SameLine();
+            ImGui::Text("对象数: %zu", esp.GetObjectCount());
+
+            if (ImGui::TreeNode("绘制项")) {
+                ImGui::Checkbox("圆圈",   &cfg.show_circle);
+                ImGui::Checkbox("名称",   &cfg.show_name);
+                ImGui::Checkbox("追踪线", &cfg.show_tracer);
+                ImGui::Checkbox("ID",     &cfg.show_id);
+                ImGui::Checkbox("分数",   &cfg.show_score);
+                ImGui::Checkbox("半径",   &cfg.show_radius);
+                ImGui::Checkbox("距离",   &cfg.show_distance);
+                ImGui::Checkbox("自身标记", &cfg.show_self_marker);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("颜色")) {
+                ImGui::ColorEdit4("圆圈##cc",  (float*)&cfg.circle_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::SameLine();
+                ImGui::ColorEdit4("名称##nc",  (float*)&cfg.name_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::ColorEdit4("追踪线##tc",(float*)&cfg.tracer_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::SameLine();
+                ImGui::ColorEdit4("自身##sc",  (float*)&cfg.self_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::ColorEdit4("敌人##ec",  (float*)&cfg.enemy_color,  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::SameLine();
+                ImGui::ColorEdit4("死亡##dc",  (float*)&cfg.dead_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("参数")) {
+                ImGui::SliderFloat("圆圈线宽", &cfg.circle_thickness, 0.5f, 8.0f);
+                ImGui::SliderInt("圆圈分段",   &cfg.circle_segments, 6, 64);
+                ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
+                ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
+                ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);
+                ImGui::SliderInt("自身 rankId", &cfg.self_rank_id, -1, 200);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("改名 (Rename)")) {
+                ImGui::Checkbox("启用改名", &cfg.rename_enabled);
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s", cfg.name_prefix.c_str());
+                if (ImGui::InputText("前缀##rp", buf, sizeof(buf))) {
+                    cfg.name_prefix = buf;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("应用改名")) {
+                    esp.ApplyRename(cfg.name_prefix);
+                }
+                ImGui::TreePop();
+            }
+        }
     }
     ImGui::End();
 }
@@ -162,8 +224,14 @@ Java_com_example_imgui_GLES3JNIView_step(JNIEnv* env, jobject obj) {
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
 
-    // 绘制单一悬浮窗口
+    // ESP: 每帧读取游戏数据 (IL2CPP), 须在渲染前完成
+    ESP_Tick();
+
+    // 绘制单一悬浮窗口 (含 ESP 控制面板)
     DrawFloatingWindow();
+
+    // ESP: 渲染透视绘制 (使用 BackgroundDrawList, 须在 NewFrame 后、Render 前)
+    ESP_Render();
 
     ImGui::Render();
     glClear(GL_COLOR_BUFFER_BIT);

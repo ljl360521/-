@@ -30,11 +30,8 @@ FILE_LIST += $(filter-out %.bak, $(wildcard $(LOCAL_PATH)/App/*.c))
 LOCAL_SRC_FILES := $(C_FILE_LIST:$(LOCAL_PATH)/%=%)
 LOCAL_SRC_FILES += $(FILE_LIST:$(LOCAL_PATH)/%=%)
 
-# 添加 ImGui 源文件
-IMGUI_SOURCES := $(wildcard $(IMGUI_ROOT)/*.cpp)
-IMGUI_SOURCES += $(wildcard $(IMGUI_ROOT)/backends/imgui_impl_android.cpp)
-IMGUI_SOURCES += $(wildcard $(IMGUI_ROOT)/backends/imgui_impl_opengl3.cpp)
-LOCAL_SRC_FILES += $(IMGUI_SOURCES:$(LOCAL_PATH)/%=%)
+# ImGui 的 .cpp (imgui + impl_android + impl_opengl3) 已预编译进 libimgui.a,
+# 源码树只保留头文件, 此处无需额外源文件。
 
 # 链接库
 LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv1_CM -lGLESv2 -lGLESv3 -lm -ldl -lz
