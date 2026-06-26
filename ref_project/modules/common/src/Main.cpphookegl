@@ -1,0 +1,279 @@
+#include "ImGuiDraw.h"
+#include "il2cpp.h"
+#include "gui.h"
+#include "logger.h"
+#include "assembly_dumper.h"
+#include "styles.h"
+ 
+#include <stdio.h>
+#include <android/native_window_jni.h> 
+#include <pthread.h>
+#include <dlfcn.h>
+#include <GLES3/gl3.h>
+#include <EGL/egl.h>
+#include <sys/ptrace.h>
+#include <memory>
+#include <map>
+#include <vector>
+#include <set>  
+
+bool initImGui = false;
+ANativeWindow *ANativeWindow_p = nullptr;
+
+
+// 函数指针
+EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay dpy, EGLSurface surface) = nullptr;
+ANativeWindow* (*orig_ANativeWindow_fromSurface)(JNIEnv* env, jobject surface) = nullptr;
+void (*origInput)(void *thiz, void *ex_ab, void *ex_ac) = nullptr;
+
+// 触摸事件处理变量
+bool g_TouchDown = false;
+float g_TouchX = 0.0f, g_TouchY = 0.0f;
+
+
+ANativeWindow* _ANativeWindow_fromSurface(JNIEnv* env, jobject surface) {
+    ANativeWindow_p = orig_ANativeWindow_fromSurface(env, surface);
+    if (ANativeWindow_p) {
+        屏宽 = ANativeWindow_getWidth(ANativeWindow_p);
+        屏高 = ANativeWindow_getHeight(ANativeWindow_p);
+    }
+    return ANativeWindow_p;
+}
+
+void myInput(void *thiz, void *ex_ab, void *ex_ac) {
+     origInput(thiz, ex_ab, ex_ac);
+    AInputEvent* event = (AInputEvent*)thiz;
+    ImGui_ImplAndroid_HandleInputEvent(event);
+}
+
+
+EGLBoolean _eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    eglQuerySurface(dpy, surface, EGL_WIDTH, &屏幕宽);
+    eglQuerySurface(dpy, surface, EGL_HEIGHT, &屏幕高);
+    
+    if (屏幕宽 <= 0 || 屏幕高 <= 0) {
+        return orig_eglSwapBuffers(dpy, surface);
+    }
+    
+    屏高 = 屏幕高;
+    屏宽 = 屏幕宽;
+    
+    // 初始化ImGui
+    if (!initImGui) {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        ImFontConfig font_cfg;
+        font_cfg.SizePixels = 20.0f;
+        
+        io.Fonts->AddFontFromMemoryTTF((void*)OPPOSans_H, OPPOSans_H_size, 22.0f, &font_cfg, io.Fonts->GetGlyphRangesChineseFull());
+        io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+        io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
+        io.DisplaySize = ImVec2(屏宽, 屏高);
+        
+        ImGui::StyleColorsLight();
+        ImGui::ApplyMatchaGreenDarkTheme();
+        
+        if (!ImGui_ImplAndroid_Init(ANativeWindow_p)) {
+            return orig_eglSwapBuffers(dpy, surface);
+        }
+        
+        if (!ImGui_ImplOpenGL3_Init("#version 300 es")) {
+            return orig_eglSwapBuffers(dpy, surface);
+        }
+        
+        ImGui::GetStyle().ScaleAllSizes(1.0f);
+
+        g_Initialized = true;      
+        initImGui = true;
+    }
+
+    // 每帧手动更新，替代 ImGui_ImplAndroid_NewFrame()
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(屏宽, 屏高);
+    
+    // DeltaTime 计算
+    static double g_Time = 0.0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double current_time = ts.tv_sec + ts.tv_nsec / 1000000000.0;
+    io.DeltaTime = g_Time > 0.0 ? (float)(current_time - g_Time) : 1.0f / 60.0f;
+    g_Time = current_time;
+    
+    ImGui_ImplOpenGL3_NewFrame();
+   
+    ImGui::NewFrame();
+    
+    绘制控件();
+    
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    
+    return orig_eglSwapBuffers(dpy, surface);
+}
+
+// ============================================================================
+// 主线程入口
+// ============================================================================
+void* main_thread(void *) {
+    sleep(2);
+    if (!g_il2cpp_tool->isObjectTrackingActive()) {
+        for (int i = 0; i < 30; i++) {
+            if (g_il2cpp_tool->startEarlyTracking()) {
+                LOGI("[Init] Early tracking started (retry %d)", i);
+                break;
+            }
+            usleep(200 * 1000);
+        }
+    }
+    const char* lib_path = 
+    #ifdef __LP64__
+        "/system/lib64";
+    #else
+        "/system/lib";
+    #endif
+
+    char input_lib[128];
+    snprintf(input_lib, sizeof(input_lib), "%s/libinput.so", lib_path);
+    
+    int android_version = android_get_device_api_level();
+    void *sym_input = nullptr;
+    
+    if (android_version >= __ANDROID_API_U__) {
+        sym_input = DobbySymbolResolver(input_lib, 
+            "_ZN7android11MotionEvent8copyFromEPKS0_b");
+    } else {
+        sym_input = DobbySymbolResolver(input_lib, 
+            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
+    }
+    
+    if (sym_input) {
+        DobbyHook(sym_input, (void *)myInput, (void **)&origInput);
+    }
+
+    DobbyHook((void*)eglSwapBuffers, (void*)_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
+    DobbyHook((void*)ANativeWindow_fromSurface, (void*)_ANativeWindow_fromSurface, (void**)&orig_ANativeWindow_fromSurface);
+
+    if (g_il2cpp_tool->initialize()) {
+        LOGI("[初始化] IL2CPP 完整初始化成功");
+
+        // 注册需要追踪的类（必须在 finalizeTracking 之前）
+        g_il2cpp_tool->trackClass("", "UGC2ObjectInteractUI");
+        g_il2cpp_tool->trackClass("PuzzleBox", "FogRenderHelper");
+        g_il2cpp_tool->trackClass("PuzzleBox", "ViewModeFadeData");
+        LOGI("[初始化] 已注册追踪类: UGC2ObjectInteractUI, FogRenderHelper");
+
+        g_il2cpp_tool->finalizeTracking();
+    } else {
+        LOGE("[初始化] IL2CPP 初始化失败");
+    }
+    return nullptr;
+}
+
+__attribute__((constructor)) void _init() {
+    g_il2cpp_tool = std::make_unique<IL2CPPRuntimeTool>();
+    if (g_il2cpp_tool->startEarlyTracking()) {
+        LOGI("[Constructor] Early tracking started immediately!");
+    } else {
+        LOGI("[Constructor] libil2cpp.so not loaded yet, will retry in thread");
+    }
+    pthread_t t;
+    pthread_create(&t, 0, main_thread, 0);
+}
+
+
+// 以下为Unity NativeLoader相关代码
+static void* unityLibraryHandle = nullptr;
+
+typedef jint (*JNI_OnLoad_t)(JavaVM *vm, void *reserved);
+
+JNIEXPORT jboolean JNICALL
+load(JNIEnv *env, jobject activityObject, jstring path) {
+    const char *libraryPath = env->GetStringUTFChars(path, nullptr);
+    if (!libraryPath) {
+        return JNI_FALSE; // Failed to obtain library path
+    }
+
+    char fullPath[1000];
+    snprintf(fullPath, sizeof(fullPath), "%s/%s", libraryPath, "libunity.so");
+
+    unityLibraryHandle = dlopen(fullPath, RTLD_LAZY | RTLD_LOCAL);
+    env->ReleaseStringUTFChars(path, libraryPath);
+
+    if (!unityLibraryHandle) {
+        LOGE("Failed to load Unity library: %s", dlerror());
+        return JNI_FALSE; // Failed to load Unity library
+    }
+
+    JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(dlsym(unityLibraryHandle, "JNI_OnLoad"));
+    if (!jniOnLoad) {
+        LOGE("JNI_OnLoad symbol not found");
+        dlclose(unityLibraryHandle);
+        unityLibraryHandle = nullptr;
+        return JNI_FALSE; // JNI_OnLoad symbol not found
+    }
+
+    JavaVM *vm = nullptr;
+    if (env->GetJavaVM(&vm) != JNI_OK) {
+        LOGE("Failed to obtain Java VM");
+        dlclose(unityLibraryHandle);
+        unityLibraryHandle = nullptr;
+        return JNI_FALSE; // Failed to obtain Java VM
+    }
+
+    jint result = jniOnLoad(vm, nullptr);
+    if (result < JNI_VERSION_1_6) {
+        LOGE("JNI version mismatch: %d", result);
+        dlclose(unityLibraryHandle);
+        unityLibraryHandle = nullptr;
+        return JNI_FALSE; // JNI version mismatch
+    }
+
+    LOGD("Unity library loaded successfully");
+    return JNI_TRUE; // Successfully loaded Unity library
+}
+
+JNIEXPORT jboolean JNICALL
+unload(JNIEnv *env, jclass activityObject) {
+    if (unityLibraryHandle) {
+        dlclose(unityLibraryHandle);
+        unityLibraryHandle = nullptr;
+        LOGD("Unity library unloaded");
+    }
+    return JNI_TRUE;
+}
+
+// ============================================================================
+// JNI_OnLoad - 专门用于注册 NativeLoader（系统 dlopen 时自动调用）
+// ============================================================================
+extern "C" JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM *vm, void *reserved) {
+    // 顺便保存 JavaVM
+    g_JavaVM = vm;
+    
+    JNIEnv *env;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        LOGE("[JNI_OnLoad] GetEnv 失败");
+        return JNI_VERSION_1_6; // 仍然返回成功，让 constructor 线程继续
+    }
+
+    jclass clazz = env->FindClass("com/unity3d/player/NativeLoader");
+    if (clazz) {
+        static const JNINativeMethod methods[] = {
+            {"load",   "(Ljava/lang/String;)Z", reinterpret_cast<void *>(load)},
+            {"unload", "()Z",                   reinterpret_cast<void *>(unload)}
+        };
+        jint ret = env->RegisterNatives(clazz, methods, sizeof(methods) / sizeof(JNINativeMethod));
+        if (ret == JNI_OK) {
+            LOGI("[JNI_OnLoad] NativeLoader 注册成功");
+        } else {
+            LOGE("[JNI_OnLoad] NativeLoader 注册失败: %d", ret);
+        }
+        env->DeleteLocalRef(clazz);
+    } else {
+        LOGD("[JNI_OnLoad] NativeLoader 类未找到（注入场景正常）");
+        env->ExceptionClear();
+    }
+
+    return JNI_VERSION_1_6;
+}
