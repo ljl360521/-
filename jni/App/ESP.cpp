@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "ESP.h"
+#include "elf_resolver.h"
 
 // =============================================================================
 // 单例
@@ -26,7 +27,7 @@ ESPSystem& ESPSystem::Instance() {
 }
 
 ESPSystem::ESPSystem()
-    : m_il2cppHandle(nullptr), m_il2cppLoaded(false),
+    : m_il2cppHandle(nullptr), m_il2cppBase(0), m_il2cppLoaded(false),
       m_fn_domain_get(nullptr), m_fn_domain_get_assemblies(nullptr),
       m_fn_assembly_get_image(nullptr), m_fn_class_from_name(nullptr),
       m_fn_class_get_fields(nullptr), m_fn_field_get_name(nullptr),
@@ -53,15 +54,31 @@ bool ESPSystem::InitIL2CPP() {
     if (m_il2cppLoaded) return true;
 
     ESP_LOGI("ESP: 初始化 IL2CPP API...");
-    m_diagStatus = "初始化中...";
+    m_diagStatus = "初始化中... (查找 libil2cpp.so)";
 
-    m_il2cppHandle = dlopen("libil2cpp.so", RTLD_NOW);
-    if (!m_il2cppHandle) {
-        m_diagStatus = std::string("失败: 无法加载 libil2cpp.so: ") + dlerror();
-        ESP_LOGE("ESP: %s", m_diagStatus.c_str());
-        return false;
+    // === 方式 1 (主): 从 /proc/self/maps 查找已加载的 libil2cpp.so 基址 ===
+    // 必须这样做, 因为外部注入的 .so 与游戏在不同 linker 命名空间,
+    // dlopen("libil2cpp.so") 会失败 ("library not found")。
+    m_il2cppBase = ELFResolver::FindLibraryBase("libil2cpp.so");
+
+    if (m_il2cppBase != 0) {
+        ESP_LOGI("ESP: + 从 /proc/self/maps 找到 libil2cpp.so @ 0x%lx", m_il2cppBase);
+        m_diagStatus = "libil2cpp.so 已定位 (maps), 解析符号...";
+    } else {
+        // === 方式 2 (兜底): 尝试传统 dlopen (某些环境可能可用) ===
+        ESP_LOGW("ESP: /proc/self/maps 未找到 libil2cpp.so, 尝试 dlopen...");
+        m_il2cppHandle = dlopen("libil2cpp.so", RTLD_NOW);
+        if (m_il2cppHandle) {
+            ESP_LOGI("ESP: + dlopen libil2cpp.so 成功");
+            m_diagStatus = "libil2cpp.so 已加载 (dlopen), 解析符号...";
+        } else {
+            const char* err = dlerror();
+            m_diagStatus = std::string("失败: libil2cpp.so 未加载 (maps+dlopen 均失败): ") + (err ? err : "?");
+            ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+            ESP_LOGE("ESP:   可能原因: 1)游戏未启动 2)非IL2CPP构建 3)命名空间隔离");
+            return false;
+        }
     }
-    m_diagStatus = "libil2cpp.so 已加载, 解析符号...";
 
     if (!ResolveIL2CPPFunctions()) {
         m_diagStatus = "失败: 解析 IL2CPP 函数符号失败";
@@ -93,13 +110,22 @@ bool ESPSystem::InitIL2CPP() {
 // =============================================================================
 
 bool ESPSystem::ResolveIL2CPPFunctions() {
+    // 通用解析: 优先 ELF (绕过命名空间隔离), dlopen handle 兜底
     #define ESP_RESOLVE(name, type) \
-        m_fn_##name = (type)dlsym(m_il2cppHandle, "il2cpp_" #name); \
-        if (!m_fn_##name) { \
-            ESP_LOGE("ESP: 无法解析 il2cpp_" #name ": %s", dlerror()); \
-            return false; \
-        } \
-        ESP_LOGD("ESP: + il2cpp_" #name " = %p", m_fn_##name);
+        do { \
+            const char* sym = "il2cpp_" #name; \
+            if (m_il2cppBase != 0) { \
+                m_fn_##name = (type)ELFResolver::LookupSymbol(m_il2cppBase, sym); \
+            } \
+            if (!m_fn_##name && m_il2cppHandle) { \
+                m_fn_##name = (type)dlsym(m_il2cppHandle, sym); \
+            } \
+            if (!m_fn_##name) { \
+                ESP_LOGE("ESP: 无法解析 %s", sym); \
+                return false; \
+            } \
+            ESP_LOGD("ESP: + %s = %p", sym, (void*)m_fn_##name); \
+        } while(0);
 
     ESP_RESOLVE(domain_get,            il2cpp_domain_get_t);
     ESP_RESOLVE(domain_get_assemblies, il2cpp_domain_get_assemblies_t);
@@ -120,8 +146,14 @@ bool ESPSystem::ResolveIL2CPPFunctions() {
     ESP_RESOLVE(thread_attach,         il2cpp_thread_attach_t);
     ESP_RESOLVE(domain_assembly_open,  il2cpp_domain_assembly_open_t);
     // image_get_class_count / image_get_class 在某些版本可能不存在, 不强制
-    m_fn_image_get_class_count = (il2cpp_image_get_class_count_t)dlsym(m_il2cppHandle, "il2cpp_image_get_class_count");
-    m_fn_image_get_class       = (il2cpp_image_get_class_t)dlsym(m_il2cppHandle, "il2cpp_image_get_class");
+    if (m_il2cppBase != 0) {
+        m_fn_image_get_class_count = (il2cpp_image_get_class_count_t)ELFResolver::LookupSymbol(m_il2cppBase, "il2cpp_image_get_class_count");
+        m_fn_image_get_class       = (il2cpp_image_get_class_t)ELFResolver::LookupSymbol(m_il2cppBase, "il2cpp_image_get_class");
+    }
+    if (!m_fn_image_get_class_count && m_il2cppHandle) {
+        m_fn_image_get_class_count = (il2cpp_image_get_class_count_t)dlsym(m_il2cppHandle, "il2cpp_image_get_class_count");
+        m_fn_image_get_class       = (il2cpp_image_get_class_t)dlsym(m_il2cppHandle, "il2cpp_image_get_class");
+    }
     ESP_LOGD("ESP: + il2cpp_image_get_class_count = %p (可选)", (void*)m_fn_image_get_class_count);
     ESP_LOGD("ESP: + il2cpp_image_get_class = %p (可选)", (void*)m_fn_image_get_class);
 

@@ -240,6 +240,7 @@ private:
 
     // --- IL2CPP API ---
     void* m_il2cppHandle;
+    uintptr_t m_il2cppBase;   // 从 /proc/self/maps 找到的 libil2cpp.so 基址
     bool  m_il2cppLoaded;
 
     // IL2CPP 函数指针
