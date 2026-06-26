@@ -16,6 +16,7 @@
 
 #include "ESP.h"
 #include "elf_resolver.h"
+#include "app_log.h"
 
 // =============================================================================
 // 单例
@@ -54,28 +55,35 @@ bool ESPSystem::InitIL2CPP() {
     if (m_il2cppLoaded) return true;
 
     ESP_LOGI("ESP: 初始化 IL2CPP API...");
+    APP_LOGI("ESP", "开始初始化 IL2CPP API");
     m_diagStatus = "初始化中... (查找 libil2cpp.so)";
 
     // === 方式 1 (主): 从 /proc/self/maps 查找已加载的 libil2cpp.so 基址 ===
     // 必须这样做, 因为外部注入的 .so 与游戏在不同 linker 命名空间,
     // dlopen("libil2cpp.so") 会失败 ("library not found")。
+    APP_LOGI("ESP", "扫描 /proc/self/maps 查找 libil2cpp.so...");
     m_il2cppBase = ELFResolver::FindLibraryBase("libil2cpp.so");
 
     if (m_il2cppBase != 0) {
         ESP_LOGI("ESP: + 从 /proc/self/maps 找到 libil2cpp.so @ 0x%lx", m_il2cppBase);
+        APP_LOGI("ESP", "找到 libil2cpp.so @ 0x%lx (来自 /proc/self/maps)", m_il2cppBase);
         m_diagStatus = "libil2cpp.so 已定位 (maps), 解析符号...";
     } else {
         // === 方式 2 (兜底): 尝试传统 dlopen (某些环境可能可用) ===
+        APP_LOGW("ESP", "/proc/self/maps 未找到 libil2cpp.so, 尝试 dlopen...");
         ESP_LOGW("ESP: /proc/self/maps 未找到 libil2cpp.so, 尝试 dlopen...");
         m_il2cppHandle = dlopen("libil2cpp.so", RTLD_NOW);
         if (m_il2cppHandle) {
             ESP_LOGI("ESP: + dlopen libil2cpp.so 成功");
+            APP_LOGI("ESP", "dlopen libil2cpp.so 成功");
             m_diagStatus = "libil2cpp.so 已加载 (dlopen), 解析符号...";
         } else {
             const char* err = dlerror();
             m_diagStatus = std::string("失败: libil2cpp.so 未加载 (maps+dlopen 均失败): ") + (err ? err : "?");
             ESP_LOGE("ESP: %s", m_diagStatus.c_str());
-            ESP_LOGE("ESP:   可能原因: 1)游戏未启动 2)非IL2CPP构建 3)命名空间隔离");
+            APP_LOGE("ESP", "libil2cpp.so 加载失败: %s", err ? err : "未知错误");
+            APP_LOGE("ESP", "可能原因: 1)游戏未启动 2)非IL2CPP构建(Mono?) 3)命名空间隔离");
+            APP_LOGE("ESP", "诊断: 请查看日志标签页的 maps 内容, 确认游戏使用的运行时库");
             return false;
         }
     }
@@ -83,24 +91,30 @@ bool ESPSystem::InitIL2CPP() {
     if (!ResolveIL2CPPFunctions()) {
         m_diagStatus = "失败: 解析 IL2CPP 函数符号失败";
         ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+        APP_LOGE("ESP", "解析 IL2CPP 函数符号失败 (见上方具体哪个符号失败)");
         return false;
     }
+    APP_LOGI("ESP", "所有 IL2CPP 函数符号解析成功");
     m_diagStatus = "符号解析完成, 查找游戏类...";
 
     if (!FindGameClasses()) {
         ESP_LOGE("ESP: 查找游戏类失败");
+        APP_LOGE("ESP", "查找游戏类失败 (见上方日志)");
         return false;
     }
+    APP_LOGI("ESP", "游戏类查找完成");
     m_diagStatus = "游戏类已找到, 初始化字段偏移...";
 
     if (!InitFieldOffsets()) {
         ESP_LOGE("ESP: 初始化字段偏移失败");
+        APP_LOGE("ESP", "初始化字段偏移失败");
         return false;
     }
 
     m_il2cppLoaded = true;
     m_diagStatus = "IL2CPP 初始化完成, 等待游戏就绪...";
     ESP_LOGI("ESP: IL2CPP API 初始化成功!");
+    APP_LOGI("ESP", "IL2CPP API 初始化全部完成, 等待游戏进入对局");
     return true;
 }
 
@@ -110,17 +124,32 @@ bool ESPSystem::InitIL2CPP() {
 // =============================================================================
 
 bool ESPSystem::ResolveIL2CPPFunctions() {
+    APP_LOGI("ESP", "=== 开始解析 IL2CPP 函数符号 (共 17 个核心 + 2 可选) ===");
+    APP_LOGI("ESP", "libil2cppBase=0x%lx, il2cppHandle=%p", m_il2cppBase, m_il2cppHandle);
+
     // 通用解析: 优先 ELF (绕过命名空间隔离), dlopen handle 兜底
+    // 每个符号都记录详细日志, 失败时立即报告哪个符号找不到
     #define ESP_RESOLVE(name, type) \
         do { \
             const char* sym = "il2cpp_" #name; \
+            APP_LOGI("ESP", "解析符号 [%s] ...", sym); \
             if (m_il2cppBase != 0) { \
                 m_fn_##name = (type)ELFResolver::LookupSymbol(m_il2cppBase, sym); \
+                if (m_fn_##name) { \
+                    APP_LOGI("ESP", "  ✓ ELF 查找成功 [%s] @ %p", sym, (void*)m_fn_##name); \
+                } else { \
+                    APP_LOGW("ESP", "  ✗ ELF 查找失败 [%s] (符号不在 .dynsym/.symtab 或节头被剥离)", sym); \
+                } \
             } \
             if (!m_fn_##name && m_il2cppHandle) { \
                 m_fn_##name = (type)dlsym(m_il2cppHandle, sym); \
+                if (m_fn_##name) { \
+                    APP_LOGI("ESP", "  ✓ dlsym 兜底成功 [%s] @ %p", sym, (void*)m_fn_##name); \
+                } \
             } \
             if (!m_fn_##name) { \
+                APP_LOGE("ESP", "  ✗✗✗ 无法解析符号 [%s] — 这是失败原因! ELF 和 dlsym 都失败", sym); \
+                APP_LOGE("ESP", "  建议: 检查 libil2cpp.so 是否被 strip 节头, 或符号 visibility=hidden"); \
                 ESP_LOGE("ESP: 无法解析 %s", sym); \
                 return false; \
             } \
@@ -168,24 +197,32 @@ bool ESPSystem::ResolveIL2CPPFunctions() {
 
 bool ESPSystem::FindGameClasses() {
     ESP_LOGI("ESP: 查找游戏类...");
+    APP_LOGI("ESP", "=== 开始查找游戏类 ===");
 
     m_domain = m_fn_domain_get();
     if (!m_domain) {
         m_diagStatus = "失败: il2cpp_domain_get 返回 null";
         ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+        APP_LOGE("ESP", "il2cpp_domain_get() 返回 null — IL2CPP 运行时未初始化?");
         return false;
     }
+    APP_LOGI("ESP", "il2cpp_domain_get() 成功, domain=%p", (void*)m_domain);
 
     // 方式 1 (优先): 用 domain_assembly_open 直接打开 Assembly-CSharp
     // 对应 game_direct_call.rs 的 open_assembly_image(domain, "Assembly-CSharp")
     if (m_fn_domain_assembly_open) {
+        APP_LOGI("ESP", "尝试 domain_assembly_open(\"Assembly-CSharp\")...");
         const Il2CppAssembly* assembly = m_fn_domain_assembly_open(m_domain, "Assembly-CSharp");
         if (assembly) {
             m_imageCSharp = m_fn_assembly_get_image(assembly);
             ESP_LOGI("ESP: + domain_assembly_open 成功打开 Assembly-CSharp, image=%p", (void*)m_imageCSharp);
+            APP_LOGI("ESP", "domain_assembly_open 成功, image=%p", (void*)m_imageCSharp);
         } else {
             ESP_LOGW("ESP: domain_assembly_open(\"Assembly-CSharp\") 返回 null, 尝试遍历方式...");
+            APP_LOGW("ESP", "domain_assembly_open 返回 null, 改用遍历方式");
         }
+    } else {
+        APP_LOGW("ESP", "domain_assembly_open 函数指针为空, 跳过此方式");
     }
 
     // 方式 2 (兜底): 遍历所有程序集查找包含 GameCoreCenter 的 image
@@ -195,9 +232,11 @@ bool ESPSystem::FindGameClasses() {
         if (!assemblies || count == 0) {
             m_diagStatus = "失败: 无可用程序集";
             ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+            APP_LOGE("ESP", "domain_get_assemblies 返回空 (count=%zu, ptr=%p)", count, (void*)assemblies);
             return false;
         }
         ESP_LOGI("ESP: 共 %zu 个程序集, 遍历查找 Assembly-CSharp...", count);
+        APP_LOGI("ESP", "共 %zu 个程序集, 遍历查找含 GameCoreCenter 的 image", count);
 
         for (size_t i = 0; i < count; i++) {
             if (!assemblies[i]) continue;
@@ -206,10 +245,19 @@ bool ESPSystem::FindGameClasses() {
 
             // 打印每个 image 的名字帮助诊断
             const char* imgName = m_fn_image_get_name ? m_fn_image_get_name(img) : nullptr;
+            if (imgName) {
+                // 仅打印非系统程序集, 避免日志过多
+                if (strstr(imgName, "mscorlib")==nullptr && strstr(imgName, "System")==nullptr &&
+                    strstr(imgName, "UnityEngine")==nullptr) {
+                    APP_LOGI("ESP", "  程序集 #%zu: %s", i, imgName);
+                }
+            }
             Il2CppClass* testClass = m_fn_class_from_name(img, "", "GameCoreCenter");
             if (testClass) {
                 m_imageCSharp = img;
                 ESP_LOGI("ESP: + 在程序集 #%zu (%s) 中找到 GameCoreCenter", i, imgName ? imgName : "?");
+                APP_LOGI("ESP", "✓ 在程序集 #%zu (%s) 中找到 GameCoreCenter, image=%p",
+                    i, imgName ? imgName : "?", (void*)img);
                 break;
             }
         }
@@ -219,6 +267,7 @@ bool ESPSystem::FindGameClasses() {
         m_diagStatus = "失败: 未找到包含 GameCoreCenter 的程序集 (Assembly-CSharp)";
         ESP_LOGE("ESP: %s", m_diagStatus.c_str());
         ESP_LOGE("ESP:   可能原因: 1)游戏尚未完全加载 2)类名不同 3)非IL2CPP构建");
+        APP_LOGE("ESP", "未找到 GameCoreCenter — 可能游戏未完全加载或非 IL2CPP 构建");
         return false;
     }
 
@@ -226,9 +275,11 @@ bool ESPSystem::FindGameClasses() {
     m_classGameCoreCenter = m_fn_class_from_name(m_imageCSharp, "", "GameCoreCenter");
     if (m_classGameCoreCenter) {
         ESP_LOGI("ESP: + 找到 GameCoreCenter (namespace=\"\")");
+        APP_LOGI("ESP", "✓ 找到类 GameCoreCenter (namespace=\"\", class=%p)", (void*)m_classGameCoreCenter);
     } else {
         m_diagStatus = "失败: GameCoreCenter 类未找到";
         ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+        APP_LOGE("ESP", "GameCoreCenter 类查找失败");
         return false;
     }
 
@@ -236,19 +287,23 @@ bool ESPSystem::FindGameClasses() {
     m_classPlayerBase = m_fn_class_from_name(m_imageCSharp, "", "PlayerBase");
     if (m_classPlayerBase) {
         ESP_LOGI("ESP: + 找到 PlayerBase (namespace=\"\")");
+        APP_LOGI("ESP", "✓ 找到类 PlayerBase (class=%p)", (void*)m_classPlayerBase);
     } else {
         ESP_LOGW("ESP: 未找到 PlayerBase (可能类名不同, 尝试其他名字...)");
+        APP_LOGW("ESP", "未找到 PlayerBase, 尝试兜底类名...");
         // 兜底: 尝试其他常见类名
         const char* altNames[] = {"Player", "Ball", "Cell", "Fish", "BallBase", "Actor"};
         for (const char* name : altNames) {
             m_classPlayerBase = m_fn_class_from_name(m_imageCSharp, "", name);
             if (m_classPlayerBase) {
                 ESP_LOGI("ESP: + 用兜底名找到 %s, 作为 PlayerBase", name);
+                APP_LOGI("ESP", "✓ 用兜底名 %s 作为 PlayerBase", name);
                 break;
             }
         }
         if (!m_classPlayerBase) {
             ESP_LOGW("ESP: PlayerBase 及兜底名均未找到, 对象读取将不可用");
+            APP_LOGW("ESP", "PlayerBase 及所有兜底名均未找到");
         }
     }
 
@@ -257,13 +312,17 @@ bool ESPSystem::FindGameClasses() {
     m_classCamera = m_fn_class_from_name(m_imageCSharp, "UnityEngine", "Camera");
     if (m_classCamera) {
         ESP_LOGI("ESP: + 找到 UnityEngine.Camera");
+        APP_LOGI("ESP", "✓ 找到类 UnityEngine.Camera (class=%p)", (void*)m_classCamera);
     } else {
         ESP_LOGW("ESP: 未找到 UnityEngine.Camera, 尝试全局命名空间...");
+        APP_LOGW("ESP", "未找到 UnityEngine.Camera, 尝试全局命名空间...");
         m_classCamera = m_fn_class_from_name(m_imageCSharp, "", "Camera");
         if (m_classCamera) {
             ESP_LOGI("ESP: + 找到 Camera (全局命名空间)");
+            APP_LOGI("ESP", "✓ 找到 Camera (全局命名空间)");
         } else {
             ESP_LOGW("ESP: Camera 未找到, 世界坐标转换将不可用 (ESP 仍可绘制原始坐标)");
+            APP_LOGW("ESP", "Camera 未找到, 世界坐标转换将不可用");
         }
     }
 
@@ -271,16 +330,20 @@ bool ESPSystem::FindGameClasses() {
     if (m_classGameCoreCenter) {
         m_methodGetInstance = m_fn_class_get_method(m_classGameCoreCenter, "get_instance", 0);
         ESP_LOGI("ESP: GameCoreCenter.get_instance = %p", (void*)m_methodGetInstance);
+        APP_LOGI("ESP", "GameCoreCenter.get_instance = %p", (void*)m_methodGetInstance);
     }
     if (m_classCamera) {
         m_methodGetCurrent = m_fn_class_get_method(m_classCamera, "get_current", 0);
         ESP_LOGI("ESP: Camera.get_current = %p", (void*)m_methodGetCurrent);
+        APP_LOGI("ESP", "Camera.get_current = %p", (void*)m_methodGetCurrent);
     }
     if (m_classPlayerBase) {
         m_methodGetName = m_fn_class_get_method(m_classPlayerBase, "get_name", 0);
         ESP_LOGI("ESP: PlayerBase.get_name = %p", (void*)m_methodGetName);
+        APP_LOGI("ESP", "PlayerBase.get_name = %p", (void*)m_methodGetName);
     }
 
+    APP_LOGI("ESP", "=== 游戏类查找完成 ===");
     return true;
 }
 
@@ -296,11 +359,13 @@ bool ESPSystem::FindGameClasses() {
 
 bool ESPSystem::InitFieldOffsets() {
     ESP_LOGI("ESP: 初始化字段偏移 (打印所有字段名 + 偏移, 帮助诊断)...");
+    APP_LOGI("ESP", "=== 初始化字段偏移 (打印全部字段) ===");
     m_diagOffsets.clear();
 
     // --- 遍历 GameCoreCenter 字段 (打印全部) ---
     if (m_classGameCoreCenter) {
         ESP_LOGI("ESP: === GameCoreCenter 全部字段 ===");
+        APP_LOGI("ESP", "--- GameCoreCenter 字段 ---");
         m_diagOffsets += "GameCoreCenter:\n";
         void* iter = nullptr;
         FieldInfo* field;
@@ -310,6 +375,7 @@ bool ESPSystem::InitFieldOffsets() {
             if (!fname) continue;
 
             ESP_LOGI("ESP:   GCC.%s @ 0x%zx", fname, offset);
+            APP_LOGI("ESP", "  GCC.%s @ 0x%zx", fname, offset);
             m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
                 char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
 
@@ -333,6 +399,7 @@ bool ESPSystem::InitFieldOffsets() {
     // --- 遍历 PlayerBase 字段 (打印全部) ---
     if (m_classPlayerBase) {
         ESP_LOGI("ESP: === PlayerBase 全部字段 ===");
+        APP_LOGI("ESP", "--- PlayerBase 字段 ---");
         m_diagOffsets += "PlayerBase:\n";
         void* iter = nullptr;
         FieldInfo* field;
@@ -342,6 +409,7 @@ bool ESPSystem::InitFieldOffsets() {
             if (!fname) continue;
 
             ESP_LOGI("ESP:   PB.%s @ 0x%zx", fname, offset);
+            APP_LOGI("ESP", "  PB.%s @ 0x%zx", fname, offset);
             m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
                 char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
 
@@ -420,10 +488,12 @@ void ESPSystem::Tick() {
         if (thread) {
             m_threadAttached.store(true);
             ESP_LOGI("ESP: + 当前线程已 attach 到 IL2CPP (thread=%p)", thread);
+            APP_LOGI("ESP", "✓ 当前线程已 attach 到 IL2CPP (thread=%p)", thread);
         } else {
             // attach 失败, 每 60 帧重试一次
             if (c % 60 == 0) {
                 ESP_LOGW("ESP: il2cpp_thread_attach 失败, 将重试...");
+                APP_LOGW("ESP", "il2cpp_thread_attach 失败, 将每 60 帧重试");
             }
             return;
         }
@@ -435,7 +505,10 @@ void ESPSystem::Tick() {
             Il2CppException* exc = nullptr;
             Il2CppObject* result = m_fn_runtime_invoke(m_methodGetInstance, nullptr, nullptr, &exc);
             if (exc) {
-                if (c % 120 == 0) ESP_LOGW("ESP: get_instance 抛出异常 (游戏可能未进入对局)");
+                if (c % 120 == 0) {
+                    ESP_LOGW("ESP: get_instance 抛出异常 (游戏可能未进入对局)");
+                    APP_LOGW("ESP", "get_instance 抛出异常 (游戏可能未进入对局)");
+                }
                 return;
             }
             if (result) {
@@ -445,12 +518,17 @@ void ESPSystem::Tick() {
                 m_diagStatus = "游戏就绪! 正在读取对象...";
                 ESP_LOGI("ESP: + GameCoreCenter.get_instance 检测到, 游戏就绪!");
                 ESP_LOGI("ESP:   data_reader auto-enabled, direct_call init requested");
+                APP_LOGI("ESP", "✓✓✓ GameCoreCenter.get_instance 检测到, 游戏就绪! instance=%p", (void*)result);
             } else {
-                if (c % 120 == 0) ESP_LOGD("ESP: get_instance 返回 null (游戏未进入对局, 等待...)");
+                if (c % 120 == 0) {
+                    ESP_LOGD("ESP: get_instance 返回 null (游戏未进入对局, 等待...)");
+                    APP_LOGD("ESP", "get_instance 返回 null (游戏未进入对局, 等待...)");
+                }
                 return;
             }
         } else {
             m_diagStatus = "失败: get_instance 方法未找到";
+            APP_LOGE("ESP", "get_instance 方法未找到");
             return;
         }
     }

@@ -8,6 +8,7 @@
 #include "imgui_impl_opengl3.h"
 #include "zt_ttf.h"
 #include "ESP.h"
+#include "app_log.h"
 #include <string>
 #include <vector>
 #include <cstring>
@@ -15,10 +16,20 @@
 #include <ctime>
 #include <cfloat>
 
+// 从 Main.cpp 引入 (用于初始化 AppLog 获取应用私有目录)
+// 注意: Main.cpp 中这些是普通 C++ 全局, 非 extern "C"
+extern jobject g_ActivityInstance;
+extern JNIEnv* getJNIEnv();
+
 int screenWidth = 0;
 int screenHeight = 0;
 bool g_Initialized = false;
 ImGuiWindow* g_window = NULL;
+
+// 前向声明 (定义在下方)
+static void EnsureAppLogInitialized();
+static void DrawESPTab();
+static void DrawLogTab();
 
 // 配置
 struct sConfig {
@@ -122,6 +133,26 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     style.ScrollbarRounding = 0;
 
     g_Initialized = true;
+
+    // 初始化应用日志系统 (自动识别被注入应用的私有目录)
+    // 用于在"日志"标签页显示详细诊断 + 导出到私有目录
+    EnsureAppLogInitialized();
+}
+
+// 确保 AppLog 已初始化 (使用 Main.cpp 的 g_ActivityInstance)
+// 在 GLES3JNIView_init 中调用一次, 也可在绘制日志页时懒加载重试
+static void EnsureAppLogInitialized() {
+    if (AppLog::Instance().IsInitialized()) return;
+    JNIEnv* env = getJNIEnv();
+    if (!env || !g_ActivityInstance) {
+        __android_log_print(ANDROID_LOG_WARN, "AppLog",
+            "EnsureAppLogInitialized: env=%p activity=%p (尚未就绪, 稍后重试)",
+            env, (void*)g_ActivityInstance);
+        return;
+    }
+    AppLog::Instance().Init(env, g_ActivityInstance);
+    APP_LOGI("UI", "ImGui 初始化完成, 屏幕尺寸: %dx%d", screenWidth, screenHeight);
+    APP_LOGI("UI", "应用日志系统已就绪 — 详情请见日志标签页");
 }
 
 JNIEXPORT void JNICALL
@@ -151,77 +182,194 @@ void DrawFloatingWindow() {
     if (ImGui::Begin("悬浮窗口", nullptr, windowFlags)) {
         g_window = ImGui::GetCurrentWindow();
 
-        // ===== ESP 透视控制面板 =====
-        ESPSystem& esp = ESPSystem::Instance();
-        ESPConfig& cfg = esp.config;
-
-        if (ImGui::CollapsingHeader("ESP 透视")) {
-            ImGui::Checkbox("总开关", &cfg.draw_enabled);
-            ImGui::SameLine();
-            ImGui::TextDisabled("(游戏就绪: %s)", esp.IsGameReady() ? "是" : "否");
-            ImGui::SameLine();
-            ImGui::Text("对象数: %zu", esp.GetObjectCount());
-
-            // 诊断信息 (帮助排查"勾选没用"的问题)
-            if (ImGui::TreeNode("诊断信息")) {
-                ImGui::TextWrapped("状态: %s", esp.GetDiagStatus().c_str());
-                ImGui::Separator();
-                ImGui::TextDisabled("字段偏移 (供对照 logcat):");
-                ImGui::TextWrapped("%s", esp.GetDiagOffsets().c_str());
-                ImGui::TreePop();
+        // 使用标签页: ESP 透视 + 日志
+        if (ImGui::BeginTabBar("MainTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+            if (ImGui::BeginTabItem("ESP 透视")) {
+                DrawESPTab();
+                ImGui::EndTabItem();
             }
-
-            if (ImGui::TreeNode("绘制项")) {
-                ImGui::Checkbox("圆圈",   &cfg.show_circle);
-                ImGui::Checkbox("名称",   &cfg.show_name);
-                ImGui::Checkbox("追踪线", &cfg.show_tracer);
-                ImGui::Checkbox("ID",     &cfg.show_id);
-                ImGui::Checkbox("分数",   &cfg.show_score);
-                ImGui::Checkbox("半径",   &cfg.show_radius);
-                ImGui::Checkbox("距离",   &cfg.show_distance);
-                ImGui::Checkbox("自身标记", &cfg.show_self_marker);
-                ImGui::TreePop();
+            if (ImGui::BeginTabItem("日志")) {
+                DrawLogTab();
+                ImGui::EndTabItem();
             }
-
-            if (ImGui::TreeNode("颜色")) {
-                ImGui::ColorEdit4("圆圈##cc",  (float*)&cfg.circle_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::SameLine();
-                ImGui::ColorEdit4("名称##nc",  (float*)&cfg.name_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::ColorEdit4("追踪线##tc",(float*)&cfg.tracer_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::SameLine();
-                ImGui::ColorEdit4("自身##sc",  (float*)&cfg.self_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::ColorEdit4("敌人##ec",  (float*)&cfg.enemy_color,  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::SameLine();
-                ImGui::ColorEdit4("死亡##dc",  (float*)&cfg.dead_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNode("参数")) {
-                ImGui::SliderFloat("圆圈线宽", &cfg.circle_thickness, 0.5f, 8.0f);
-                ImGui::SliderInt("圆圈分段",   &cfg.circle_segments, 6, 64);
-                ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
-                ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
-                ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);
-                ImGui::SliderInt("自身 rankId", &cfg.self_rank_id, -1, 200);
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNode("改名 (Rename)")) {
-                ImGui::Checkbox("启用改名", &cfg.rename_enabled);
-                char buf[128];
-                snprintf(buf, sizeof(buf), "%s", cfg.name_prefix.c_str());
-                if (ImGui::InputText("前缀##rp", buf, sizeof(buf))) {
-                    cfg.name_prefix = buf;
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("应用改名")) {
-                    esp.ApplyRename(cfg.name_prefix);
-                }
-                ImGui::TreePop();
-            }
+            ImGui::EndTabBar();
         }
     }
     ImGui::End();
+}
+
+// ===== ESP 透视标签页 (原 DrawFloatingWindow 主体) =====
+static void DrawESPTab() {
+    ESPSystem& esp = ESPSystem::Instance();
+    ESPConfig& cfg = esp.config;
+
+    if (ImGui::CollapsingHeader("ESP 透视")) {
+        ImGui::Checkbox("总开关", &cfg.draw_enabled);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(游戏就绪: %s)", esp.IsGameReady() ? "是" : "否");
+        ImGui::SameLine();
+        ImGui::Text("对象数: %zu", esp.GetObjectCount());
+
+        // 诊断信息 (帮助排查"勾选没用"的问题)
+        if (ImGui::TreeNode("诊断信息")) {
+            ImGui::TextWrapped("状态: %s", esp.GetDiagStatus().c_str());
+            ImGui::Separator();
+            ImGui::TextDisabled("字段偏移 (供对照 logcat):");
+            ImGui::TextWrapped("%s", esp.GetDiagOffsets().c_str());
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("绘制项")) {
+            ImGui::Checkbox("圆圈",   &cfg.show_circle);
+            ImGui::Checkbox("名称",   &cfg.show_name);
+            ImGui::Checkbox("追踪线", &cfg.show_tracer);
+            ImGui::Checkbox("ID",     &cfg.show_id);
+            ImGui::Checkbox("分数",   &cfg.show_score);
+            ImGui::Checkbox("半径",   &cfg.show_radius);
+            ImGui::Checkbox("距离",   &cfg.show_distance);
+            ImGui::Checkbox("自身标记", &cfg.show_self_marker);
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("颜色")) {
+            ImGui::ColorEdit4("圆圈##cc",  (float*)&cfg.circle_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::SameLine();
+            ImGui::ColorEdit4("名称##nc",  (float*)&cfg.name_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::ColorEdit4("追踪线##tc",(float*)&cfg.tracer_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::SameLine();
+            ImGui::ColorEdit4("自身##sc",  (float*)&cfg.self_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::ColorEdit4("敌人##ec",  (float*)&cfg.enemy_color,  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::SameLine();
+            ImGui::ColorEdit4("死亡##dc",  (float*)&cfg.dead_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreview);
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("参数")) {
+            ImGui::SliderFloat("圆圈线宽", &cfg.circle_thickness, 0.5f, 8.0f);
+            ImGui::SliderInt("圆圈分段",   &cfg.circle_segments, 6, 64);
+            ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
+            ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
+            ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);
+            ImGui::SliderInt("自身 rankId", &cfg.self_rank_id, -1, 200);
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("改名 (Rename)")) {
+            ImGui::Checkbox("启用改名", &cfg.rename_enabled);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s", cfg.name_prefix.c_str());
+            if (ImGui::InputText("前缀##rp", buf, sizeof(buf))) {
+                cfg.name_prefix = buf;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("应用改名")) {
+                esp.ApplyRename(cfg.name_prefix);
+            }
+            ImGui::TreePop();
+        }
+    }
+}
+
+// ===== 日志标签页 =====
+// 显示 AppLog 内存缓冲中的详细日志, 支持导出到被注入应用的私有目录
+static bool g_logAutoScroll = true;     // 自动滚动到最新
+static bool g_logShowDebug = true;      // 显示 DEBUG 级别
+static std::string g_lastExportResult;  // 上次导出结果提示
+
+static void DrawLogTab() {
+    // 懒加载: 如果 AppLog 还没初始化, 尝试初始化
+    if (!AppLog::Instance().IsInitialized()) {
+        EnsureAppLogInitialized();
+    }
+
+    AppLog& log = AppLog::Instance();
+
+    // --- 顶部: 包名 + 导出路径 + 操作按钮 ---
+    if (ImGui::Button("导出日志到文件")) {
+        if (log.IsInitialized()) {
+            std::string path = log.ExportToFile();
+            if (!path.empty()) {
+                g_lastExportResult = "✓ 导出成功: " + path;
+                APP_LOGI("UI", "用户点击导出日志, 已写入: %s", path.c_str());
+            } else {
+                g_lastExportResult = "✗ 导出失败 (无法写入文件, 请检查权限)";
+                APP_LOGE("UI", "用户点击导出日志, 但导出失败");
+            }
+        } else {
+            g_lastExportResult = "✗ 日志系统未初始化 (无法获取应用私有目录)";
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("清空日志")) {
+        log.Clear();
+        g_lastExportResult = "已清空内存日志";
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("自动滚动", &g_logAutoScroll);
+    ImGui::SameLine();
+    ImGui::Checkbox("显示DEBUG", &g_logShowDebug);
+
+    ImGui::Separator();
+
+    // 显示包名和导出路径
+    if (log.IsInitialized()) {
+        ImGui::TextDisabled("包名: %s", log.GetPackageName().c_str());
+        ImGui::TextDisabled("导出路径: %s", log.GetExportPath().c_str());
+    } else {
+        ImGui::TextDisabled("日志系统未初始化 (等待 Activity 就绪...)");
+    }
+
+    // 显示上次导出结果
+    if (!g_lastExportResult.empty()) {
+        ImGui::TextWrapped("%s", g_lastExportResult.c_str());
+    }
+
+    ImGui::Separator();
+
+    // --- 日志列表 (可滚动) ---
+    // 使用 ImGuiChildFlags_Border 让日志区有边框, 便于区分
+    ImGui::BeginChild("LogList", ImVec2(0, 0), ImGuiChildFlags_Border);
+
+    std::vector<AppLogEntry> lines = log.GetLines();
+    for (const auto& e : lines) {
+        // DEBUG 级别过滤
+        if (e.level == APP_LOG_DEBUG && !g_logShowDebug) continue;
+
+        // 按级别着色
+        ImU32 color = IM_COL32(200, 200, 200, 255); // 默认灰白
+        const char* levelStr = "?";
+        switch (e.level) {
+            case APP_LOG_DEBUG: color = IM_COL32(150, 150, 150, 255); levelStr = "D"; break;
+            case APP_LOG_INFO:  color = IM_COL32(100, 255, 100, 255); levelStr = "I"; break;
+            case APP_LOG_WARN:  color = IM_COL32(255, 200, 0, 255);   levelStr = "W"; break;
+            case APP_LOG_ERROR: color = IM_COL32(255, 80, 80, 255);   levelStr = "E"; break;
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        ImGui::TextUnformatted("[");
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted(e.timestamp.c_str());
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted("][");
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted(levelStr);
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted("][");
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted(e.tag.c_str());
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted("] ");
+        ImGui::SameLine(0, 0);
+        ImGui::TextUnformatted(e.message.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    // 自动滚动到底部
+    if (g_logAutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+        ImGui::SetScrollHereY(1.0f);
+    }
+
+    ImGui::EndChild();
 }
 
 JNIEXPORT void JNICALL
