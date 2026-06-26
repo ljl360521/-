@@ -23,11 +23,18 @@
 #include <cstdio>
 #include <cerrno>
 #include "app_log.h"
+#include "xdl.h"
 
 #define ELF_LOG_TAG "ELFResolver"
 #define ELF_LOGI(...) __android_log_print(ANDROID_LOG_INFO,  ELF_LOG_TAG, __VA_ARGS__)
 #define ELF_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, ELF_LOG_TAG, __VA_ARGS__)
 #define ELF_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, ELF_LOG_TAG, __VA_ARGS__)
+
+// 模块级标记: 控制符号转储只执行一次 (避免每帧重试时反复打印)
+// 定义在头文件中, 所有 include 此头文件的编译单元共享 (inline 变量 C++17)
+namespace ELFResolver {
+    inline bool g_symbolsDumped = false;
+}
 
 namespace ELFResolver {
 
@@ -376,16 +383,159 @@ inline void* LookupSymbolFile(const std::string& libPath, uintptr_t base, const 
 }
 
 // -----------------------------------------------------------------------------
+// 使用 xDL 库查找符号 (推荐 — 能搜索 .symtab, 找到 hidden/非导出符号)
+// xDL 是 HexHacking 的增强 dlopen/dlsym 实现:
+//   xdl_sym()  → 搜索 .dynsym (仅导出符号)
+//   xdl_dsym() → 搜索 .symtab (包含 hidden 符号, 某些游戏 IL2CPP 符号在此)
+//
+// 关键: libil2cpp.so 的 il2cpp_* 函数可能 visibility=hidden (不在 .dynsym),
+//       只在 .symtab 中 — 此时必须用 xdl_dsym()
+//
+// libName: 库名 (如 "libil2cpp.so")
+// symName: 符号名 (如 "il2cpp_domain_get")
+// 返回符号运行时地址, nullptr 表示未找到
+// -----------------------------------------------------------------------------
+inline void* LookupSymbolXDL(const char* libName, const char* symName) {
+    APP_LOGI("ELF", "LookupSymbolXDL(lib=%s, sym=%s) — 用 xdl_dsym 搜索 .symtab", libName, symName);
+
+    void* handle = xdl_open(libName, XDL_DEFAULT);
+    if (!handle) {
+        APP_LOGW("ELF", "  xdl_open(%s) 失败 — 库未加载或 xDL 内部错误", libName);
+        return nullptr;
+    }
+    APP_LOGI("ELF", "  xdl_open(%s) 成功, handle=%p", libName, handle);
+
+    size_t symSize = 0;
+
+    // 优先用 xdl_dsym 搜索 .symtab (能找到 hidden 符号)
+    void* addr = xdl_dsym(handle, symName, &symSize);
+    if (addr) {
+        APP_LOGI("ELF", "  ✓ xdl_dsym 找到 %s @ %p (size=%zu, 来自 .symtab)",
+            symName, addr, symSize);
+        xdl_close(handle);
+        return addr;
+    }
+    APP_LOGW("ELF", "  xdl_dsym 未找到 %s (.symtab 中也无此符号)", symName);
+
+    // 回退到 xdl_sym 搜索 .dynsym
+    addr = xdl_sym(handle, symName, &symSize);
+    if (addr) {
+        APP_LOGI("ELF", "  ✓ xdl_sym 找到 %s @ %p (size=%zu, 来自 .dynsym)",
+            symName, addr, symSize);
+        xdl_close(handle);
+        return addr;
+    }
+
+    APP_LOGW("ELF", "  xdl_sym 也未找到 %s — xDL 双查均失败", symName);
+    xdl_close(handle);
+    return nullptr;
+}
+
+// -----------------------------------------------------------------------------
+// 转储 .dynsym 的前 N 个符号名到日志 (诊断用 — 看符号是否被重命名/混淆)
+// 仅首次调用有效 (用 g_symbolsDumped 标记)
+// libName: 库名
+// maxCount: 最多转储的符号数量
+// -----------------------------------------------------------------------------
+inline void DumpDynSymbols(const char* libName, size_t maxCount = 50) {
+    if (g_symbolsDumped) return;
+    g_symbolsDumped = true;
+
+    APP_LOGI("ELF", "=== 转储 %s 的前 %zu 个 DYNSYM 符号 (诊断用) ===", libName, maxCount);
+
+    std::string libPath = FindLibraryPath(libName);
+    if (libPath.empty()) {
+        APP_LOGW("ELF", "  无法获取 %s 路径, 跳过转储", libName);
+        return;
+    }
+
+    FILE* fp = fopen(libPath.c_str(), "rb");
+    if (!fp) {
+        APP_LOGW("ELF", "  无法打开 %s, 跳过转储", libPath.c_str());
+        return;
+    }
+
+    Elf64_Ehdr ehdr;
+    if (fread(&ehdr, sizeof(ehdr), 1, fp) != 1 ||
+        memcmp(ehdr.e_ident, "\x7f""ELF", 4) != 0 ||
+        ehdr.e_shoff == 0 || ehdr.e_shnum == 0) {
+        APP_LOGW("ELF", "  ELF header 无效或已 strip, 跳过转储");
+        fclose(fp);
+        return;
+    }
+
+    std::vector<Elf64_Shdr> shdrs(ehdr.e_shnum);
+    if (fseek(fp, (long)ehdr.e_shoff, SEEK_SET) != 0 ||
+        fread(shdrs.data(), sizeof(Elf64_Shdr), ehdr.e_shnum, fp) != ehdr.e_shnum) {
+        fclose(fp);
+        return;
+    }
+
+    size_t dumped = 0;
+    for (uint16_t i = 0; i < ehdr.e_shnum && dumped < maxCount; i++) {
+        Elf64_Shdr* sh = &shdrs[i];
+        if (sh->sh_type != SHT_DYNSYM) continue;
+        if (sh->sh_link >= ehdr.e_shnum) continue;
+
+        Elf64_Shdr* strSh = &shdrs[sh->sh_link];
+        std::vector<char> strtab(strSh->sh_size);
+        if (fseek(fp, (long)strSh->sh_offset, SEEK_SET) != 0 ||
+            fread(strtab.data(), 1, strSh->sh_size, fp) != strSh->sh_size) continue;
+
+        size_t symCount = sh->sh_size / sizeof(Elf64_Sym);
+        std::vector<Elf64_Sym> syms(symCount);
+        if (fseek(fp, (long)sh->sh_offset, SEEK_SET) != 0 ||
+            fread(syms.data(), sizeof(Elf64_Sym), symCount, fp) != symCount) continue;
+
+        APP_LOGI("ELF", "  DYNSYM 节 #%u 共 %zu 个符号, 转储前 %zu 个:", i, symCount, maxCount);
+
+        for (size_t s = 0; s < symCount && dumped < maxCount; s++) {
+            Elf64_Sym* sym = &syms[s];
+            if (sym->st_name == 0 || sym->st_name >= strtab.size()) continue;
+            const char* name = strtab.data() + sym->st_name;
+            // 只打印以 il2cpp 开头的符号 (重点关注)
+            if (strncmp(name, "il2cpp", 6) == 0) {
+                APP_LOGI("ELF", "    [%zu] %s (value=0x%lx, size=%lu)",
+                    dumped, name, (unsigned long)sym->st_value, (unsigned long)sym->st_size);
+                dumped++;
+            }
+        }
+        // 如果没找到 il2cpp 开头的, 打印前 N 个任意符号
+        if (dumped == 0) {
+            APP_LOGW("ELF", "  ⚠️ 没有以 'il2cpp' 开头的符号! 可能符号被混淆/重命名");
+            APP_LOGI("ELF", "  转储前 %zu 个任意符号:", maxCount);
+            for (size_t s = 0; s < symCount && dumped < maxCount; s++) {
+                Elf64_Sym* sym = &syms[s];
+                if (sym->st_name == 0 || sym->st_name >= strtab.size()) continue;
+                const char* name = strtab.data() + sym->st_name;
+                APP_LOGI("ELF", "    [%zu] %s", dumped, name);
+                dumped++;
+            }
+        }
+        break; // 只处理第一个 DYNSYM 节
+    }
+
+    APP_LOGI("ELF", "=== 符号转储完成 (共 %zu 个) ===", dumped);
+    fclose(fp);
+}
+
+// -----------------------------------------------------------------------------
 // 兼容旧接口: 在 ELF 内存映像中查找符号
-// (内部会先尝试内存查找, 失败则改用磁盘文件查找)
+// 查找优先级: 内存(.dynsym/.symtab) → xDL dsym(.symtab, 含 hidden) → 磁盘文件
 // -----------------------------------------------------------------------------
 inline void* LookupSymbol(uintptr_t base, const char* symName) {
     // 1. 先尝试内存查找 (如果节头被映射到内存了)
     void* addr = LookupSymbolMemory(base, symName);
     if (addr) return addr;
 
-    // 2. 内存查找失败 (节头未映射) → 从磁盘文件读取
-    APP_LOGI("ELF", "内存查找失败, 改用磁盘文件查找...");
+    // 2. 用 xDL 的 xdl_dsym() 查找 .symtab (能找到 hidden 符号 — 关键!)
+    //    libil2cpp.so 的 il2cpp_* 函数常被 strip 出 .dynsym, 但保留在 .symtab
+    APP_LOGI("ELF", "内存查找失败, 用 xDL 查找 .symtab (含 hidden 符号)...");
+    addr = LookupSymbolXDL("libil2cpp.so", symName);
+    if (addr) return addr;
+
+    // 3. xDL 也失败 → 从磁盘文件读取 .so 解析 (兜底)
+    APP_LOGI("ELF", "xDL 查找失败, 改用磁盘文件查找...");
     std::string libPath = FindLibraryPath("libil2cpp.so");
     if (libPath.empty()) {
         APP_LOGE("ELF", "无法获取 libil2cpp.so 的磁盘路径, 查找 %s 失败", symName);

@@ -150,6 +150,8 @@ bool ESPSystem::ResolveIL2CPPFunctions() {
             if (!m_fn_##name) { \
                 APP_LOGE("ESP", "  ✗✗✗ 无法解析符号 [%s] — 这是失败原因! ELF 和 dlsym 都失败", sym); \
                 APP_LOGE("ESP", "  建议: 检查 libil2cpp.so 是否被 strip 节头, 或符号 visibility=hidden"); \
+                APP_LOGI("ESP", "  → 转储 .dynsym 符号表帮助诊断 (检查符号是否被混淆/重命名)..."); \
+                ELFResolver::DumpDynSymbols("libil2cpp.so"); \
                 ESP_LOGE("ESP: 无法解析 %s", sym); \
                 return false; \
             } \
@@ -477,8 +479,18 @@ void ESPSystem::Tick() {
     m_pcounter.store(c);
 
     // 首次调用时初始化 IL2CPP
+    // 失败后不要每帧重试 (会刷爆日志缓冲), 每 300 帧 (约 5 秒@60fps) 重试一次
     if (!m_il2cppLoaded) {
-        if (!InitIL2CPP()) return;
+        static uint32_t s_lastInitAttempt = 0;
+        if (s_lastInitAttempt != 0 && (c - s_lastInitAttempt) < 300) {
+            return; // 冷却中, 静默跳过 (不打印日志)
+        }
+        s_lastInitAttempt = c;
+        if (!InitIL2CPP()) {
+            // 失败一次后, 每 300 帧才提示一次重试
+            APP_LOGW("ESP", "InitIL2CPP 失败, 将在约 5 秒后重试 (避免日志刷屏)");
+            return;
+        }
     }
 
     // 关键: 当前线程必须 attach 到 IL2CPP 运行时, 否则 runtime_invoke 会崩溃
