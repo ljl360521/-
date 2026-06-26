@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #define APPLOG_TAG "AppLog"
 #define APPLOG_LOGI(...) __android_log_print(ANDROID_LOG_INFO,  APPLOG_TAG, __VA_ARGS__)
@@ -66,47 +67,84 @@ public:
     }
 
     // ---------------------------------------------------------------------
-    // 初始化 — 通过 Java 反射获取应用的 filesDir (自动识别包名)
-    //   filesDir 形如 /storage/emulated/0/Android/data/com.ztgame.bobbeta/files
-    //   或 /data/data/com.ztgame.bobbeta/files (内部存储)
+    // 初始化 (无参版本) — 通过 /proc/self/cmdline 读取包名, 构造私有目录路径
+    // 这是最可靠的方式, 不依赖 JNI/Activity/类加载器, 任何时候都能用
+    //
+    // 进程名 (cmdline 第一项) 就是 Android 应用包名, 例如 com.ztgame.bobbeta
+    // 然后构造外部存储私有目录: /storage/emulated/0/Android/data/<包名>/files/
     // ---------------------------------------------------------------------
-    void Init(JNIEnv* env, jobject activity) {
+    void Init() {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_initialized) return;
 
-        m_filesDir = GetFilesDir(env, activity);
-        if (!m_filesDir.empty()) {
-            // 提取包名 (从路径里)
-            // 路径形如 .../Android/data/<包名>/files
-            size_t pos = m_filesDir.find("Android/data/");
-            if (pos != std::string::npos) {
-                size_t pkgStart = pos + strlen("Android/data/");
-                size_t pkgEnd = m_filesDir.find('/', pkgStart);
-                if (pkgEnd != std::string::npos) {
-                    m_packageName = m_filesDir.substr(pkgStart, pkgEnd - pkgStart);
-                }
-            }
-            m_exportPath = m_filesDir + "/esp_log.txt";
-            m_initialized = true;
-            APPLOG_LOGI("AppLog 初始化: filesDir=%s pkg=%s export=%s",
-                m_filesDir.c_str(), m_packageName.c_str(), m_exportPath.c_str());
-            // 记录一条初始日志
-            LogInternal(APP_LOG_INFO, "AppLog", "日志系统初始化, 包名=" + m_packageName + ", 导出路径=" + m_exportPath);
-        } else {
-            // 兜底: 用 /proc/self/cmdline 读包名
-            m_packageName = ReadCmdlinePackage();
-            if (!m_packageName.empty()) {
-                m_filesDir = "/storage/emulated/0/Android/data/" + m_packageName + "/files";
-                EnsureDir(m_filesDir);
-                m_exportPath = m_filesDir + "/esp_log.txt";
-                m_initialized = true;
-                APPLOG_LOGI("AppLog 初始化(cmdline): pkg=%s export=%s",
-                    m_packageName.c_str(), m_exportPath.c_str());
-                LogInternal(APP_LOG_INFO, "AppLog", "日志系统初始化(cmdline), 包名=" + m_packageName);
-            } else {
-                APPLOG_LOGI("AppLog 初始化失败: 无法获取 filesDir 和 cmdline");
-            }
+        APPLOG_LOGI("AppLog::Init() — 通过 /proc/self/cmdline 识别包名");
+
+        // 步骤 1: 从 /proc/self/cmdline 读包名 (进程名 = 包名)
+        m_packageName = ReadCmdlinePackage();
+        if (m_packageName.empty()) {
+            APPLOG_LOGI("AppLog: /proc/self/cmdline 读取失败, 初始化失败");
+            LogInternal(APP_LOG_ERROR, "AppLog", "初始化失败: 无法读取 /proc/self/cmdline");
+            return;
         }
+        APPLOG_LOGI("AppLog: 识别到包名 = %s", m_packageName.c_str());
+
+        // 步骤 2: 尝试外部存储私有目录 (用户可通过文件管理器访问)
+        //   /storage/emulated/0/Android/data/<包名>/files/
+        std::string extDir = "/storage/emulated/0/Android/data/" + m_packageName + "/files";
+        bool extOk = EnsureDir(extDir);
+        if (extOk && TestWritable(extDir)) {
+            m_filesDir = extDir;
+            m_exportPath = extDir + "/esp_log.txt";
+            m_initialized = true;
+            APPLOG_LOGI("AppLog: 使用外部存储私有目录: %s", m_filesDir.c_str());
+            LogInternal(APP_LOG_INFO, "AppLog",
+                "日志系统初始化成功 [cmdline], 包名=" + m_packageName +
+                ", 路径=" + m_exportPath);
+            return;
+        }
+
+        // 步骤 3: 外部存储不可用, 回退到内部存储私有目录 (应用总有权限)
+        //   /data/data/<包名>/files/  或  /data/user/0/<包名>/files/
+        std::string intDir = "/data/data/" + m_packageName + "/files";
+        bool intOk = EnsureDir(intDir);
+        if (!intOk) {
+            // 某些设备用 /data/user/0/
+            intDir = "/data/user/0/" + m_packageName + "/files";
+            intOk = EnsureDir(intDir);
+        }
+        if (intOk && TestWritable(intDir)) {
+            m_filesDir = intDir;
+            m_exportPath = intDir + "/esp_log.txt";
+            m_initialized = true;
+            APPLOG_LOGI("AppLog: 使用内部存储私有目录: %s", m_filesDir.c_str());
+            LogInternal(APP_LOG_INFO, "AppLog",
+                "日志系统初始化成功 [内部存储], 包名=" + m_packageName +
+                ", 路径=" + m_exportPath);
+            return;
+        }
+
+        // 步骤 4: 都失败 — 记录错误, 但仍标记为已初始化避免反复重试
+        // 用 /tmp 作为最后兜底 (至少能导出)
+        m_filesDir = "/data/local/tmp";
+        m_exportPath = m_filesDir + "/esp_log_" + m_packageName + ".txt";
+        m_initialized = true;
+        APPLOG_LOGI("AppLog: 私有目录均不可写, 兜底使用: %s", m_exportPath.c_str());
+        LogInternal(APP_LOG_ERROR, "AppLog",
+            "警告: 外部/内部私有目录均不可写, 兜底路径=" + m_exportPath +
+            ", 包名=" + m_packageName);
+    }
+
+    // ---------------------------------------------------------------------
+    // 初始化 (带 Activity 版本) — 兼容旧接口, 内部调用无参版本
+    // 反射方式作为补充, 如果无参版本已成功则跳过
+    // ---------------------------------------------------------------------
+    void Init(JNIEnv* env, jobject activity) {
+        // 先尝试无参版本 (最可靠)
+        if (!m_initialized) {
+            Init();
+        }
+        // 如果无参版本已成功, 不再重复 (反射方式可能因 Activity 时机问题失败)
+        // 保留此接口仅为兼容已有调用代码
     }
 
     // ---------------------------------------------------------------------
@@ -237,28 +275,70 @@ private:
         return result;
     }
 
-    // 从 /proc/self/cmdline 读包名 (进程名)
+    // 从 /proc/self/cmdline 读包名 (进程名 = 包名)
+    // cmdline 是 \0 分隔的参数列表, 第一个参数就是进程名
+    // 对于 Android 应用, 进程名默认等于包名 (除非 AndroidManifest.xml 配置了 android:process)
     static std::string ReadCmdlinePackage() {
-        FILE* fp = fopen("/proc/self/cmdline", "r");
-        if (!fp) return "";
-        char buf[256] = {0};
-        size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-        fclose(fp);
-        if (n == 0) return "";
-        // cmdline 以 \0 分隔, 第一个就是进程名(包名)
-        return std::string(buf);
+        // 方式 1: /proc/self/cmdline
+        int fd = open("/proc/self/cmdline", O_RDONLY);
+        if (fd >= 0) {
+            char buf[256] = {0};
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0 && buf[0] != '\0') {
+                std::string pkg(buf);  // 遇到第一个 \0 截断
+                // 过滤掉包含 ':' 的进程名 (如 com.pkg:remote 这种子进程)
+                // 取冒号前的部分作为包名
+                size_t colon = pkg.find(':');
+                if (colon != std::string::npos) {
+                    pkg = pkg.substr(0, colon);
+                }
+                if (!pkg.empty()) return pkg;
+            }
+        }
+        // 方式 2: /proc/self/comm (进程名, 可能有 15 字符截断)
+        fd = open("/proc/self/comm", O_RDONLY);
+        if (fd >= 0) {
+            char buf[256] = {0};
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0) {
+                // 去掉末尾换行
+                while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) {
+                    buf[--n] = '\0';
+                }
+                if (n > 0) return std::string(buf);
+            }
+        }
+        return "";
     }
 
-    // 确保目录存在 (递归创建)
-    static void EnsureDir(const std::string& path) {
-        if (path.empty()) return;
+    // 确保目录存在 (递归创建), 返回目录是否最终存在且可写
+    static bool EnsureDir(const std::string& path) {
+        if (path.empty()) return false;
         std::string dir;
         size_t pos = 0;
+        // 逐级创建 (忽略已存在的错误)
         while ((pos = path.find('/', pos + 1)) != std::string::npos) {
             dir = path.substr(0, pos);
-            mkdir(dir.c_str(), 0755);
+            mkdir(dir.c_str(), 0755);  // 已存在会返回 EEXIST, 忽略
         }
         mkdir(path.c_str(), 0755);
+        // 检查最终目录是否真的存在
+        struct stat st;
+        return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+
+    // 测试目录是否可写 (创建临时文件测试)
+    static bool TestWritable(const std::string& dir) {
+        if (dir.empty()) return false;
+        std::string testFile = dir + "/.esp_log_wtest";
+        FILE* fp = fopen(testFile.c_str(), "w");
+        if (!fp) return false;
+        fputs("t", fp);
+        fclose(fp);
+        unlink(testFile.c_str());  // 删除测试文件
+        return true;
     }
 
     static std::string NowTimeStr() {

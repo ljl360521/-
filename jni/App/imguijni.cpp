@@ -139,20 +139,24 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     EnsureAppLogInitialized();
 }
 
-// 确保 AppLog 已初始化 (使用 Main.cpp 的 g_ActivityInstance)
+// 确保 AppLog 已初始化
+// 使用 /proc/self/cmdline 识别包名 (不依赖 Activity, 任何时候都可靠)
 // 在 GLES3JNIView_init 中调用一次, 也可在绘制日志页时懒加载重试
 static void EnsureAppLogInitialized() {
     if (AppLog::Instance().IsInitialized()) return;
-    JNIEnv* env = getJNIEnv();
-    if (!env || !g_ActivityInstance) {
+    // 无参 Init: 通过 /proc/self/cmdline 读取包名, 构造私有目录路径
+    // 不依赖 g_ActivityInstance (它在另一个 native 线程异步设置, 时机不可靠)
+    AppLog::Instance().Init();
+    if (AppLog::Instance().IsInitialized()) {
+        APP_LOGI("UI", "ImGui 初始化完成, 屏幕尺寸: %dx%d", screenWidth, screenHeight);
+        APP_LOGI("UI", "应用日志系统已就绪 — 包名=%s 路径=%s",
+            AppLog::Instance().GetPackageName().c_str(),
+            AppLog::Instance().GetExportPath().c_str());
+        APP_LOGI("UI", "详情请见日志标签页, 点击导出按钮可导出到私有目录");
+    } else {
         __android_log_print(ANDROID_LOG_WARN, "AppLog",
-            "EnsureAppLogInitialized: env=%p activity=%p (尚未就绪, 稍后重试)",
-            env, (void*)g_ActivityInstance);
-        return;
+            "EnsureAppLogInitialized: Init() 失败 (无法读取 /proc/self/cmdline?)");
     }
-    AppLog::Instance().Init(env, g_ActivityInstance);
-    APP_LOGI("UI", "ImGui 初始化完成, 屏幕尺寸: %dx%d", screenWidth, screenHeight);
-    APP_LOGI("UI", "应用日志系统已就绪 — 详情请见日志标签页");
 }
 
 JNIEXPORT void JNICALL
