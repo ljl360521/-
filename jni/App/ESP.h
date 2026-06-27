@@ -26,6 +26,8 @@
 #include <mutex>
 #include <atomic>
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include "imgui.h"
 
 #define ESP_TAG "ESP"
@@ -315,7 +317,17 @@ private:
     MethodInfo* m_methodGetOrthographicSize;    // Camera.get_orthographicSize
 
     // 字段偏移
-    FieldOffsets m_offsets;
+    FieldOffsets m_offsets;         // PlayerBase 偏移
+    FieldOffsets m_ballOffsets;     // Ball 偏移 (独立解析, 字段布局可能不同)
+
+    // 按类动态缓存字段偏移 (运行时用 object_get_class 拿真实类, 再解析偏移)
+    // key = Il2CppClass*, value = 该类的字段偏移
+    // 解决问题: BallDic 里的对象类名未知, 用 object_get_class 动态识别
+    std::mutex m_classOffsetMutex;
+    std::unordered_map<Il2CppClass*, FieldOffsets> m_classOffsetCache;
+
+    // 已记录过的类名 (诊断用, 首次遇到某类时打印其所有字段)
+    std::unordered_set<Il2CppClass*> m_loggedClasses;
 
     // --- 游戏状态 ---
     std::atomic<bool> m_gameReady;
@@ -346,6 +358,14 @@ private:
     bool GetTransformPosition(Il2CppObject* transformObj, float& outX, float& outY, float& outZ);
     bool TryReadFromBallDic(void* dicObj, int selfPlayerId, std::vector<GameObjectInfo>& out, uint32_t c);
     void FillBallObject(Il2CppObject* ballObj, int selfPlayerId, std::vector<GameObjectInfo>& out, uint32_t c, size_t idx);
+
+    // 动态解析对象所属类的字段偏移 (不依赖类名, 用 object_get_class 识别)
+    // 返回缓存的偏移; 首次遇到某类时会遍历其所有字段并打印日志
+    const FieldOffsets& GetOrResolveClassOffsets(Il2CppClass* objClass);
+    // 通用字段名匹配 (供 GetOrResolveClassOffsets 调用, 填充 FieldOffsets)
+    void MatchFieldOffsets(const char* fname, size_t offset, FieldOffsets& out);
+    // 解析一个对象的字段 (用对象自身类的偏移)
+    GameObjectInfo ReadObjectWithOwnClass(Il2CppObject* obj, int selfPlayerId);
 };
 
 // =============================================================================

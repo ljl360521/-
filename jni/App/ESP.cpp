@@ -913,8 +913,9 @@ bool ESPSystem::FindBallAndTransformClasses() {
 
 bool ESPSystem::InitBallFieldOffsets(Il2CppClass* ballClass) {
     if (!ballClass) return false;
-    APP_LOGI("ESP", "--- Ball(DrawCircle) 字段 ---");
-    m_diagOffsets += "Ball(DrawCircle):\n";
+    const char* cn = m_fn_class_get_name ? m_fn_class_get_name(ballClass) : "?";
+    APP_LOGI("ESP", "--- Ball(%s) 字段 ---", cn ? cn : "?");
+    m_diagOffsets += std::string("Ball(") + (cn ? cn : "?") + "):\n";
     void* iter = nullptr;
     FieldInfo* field;
     while ((field = m_fn_class_get_fields(ballClass, &iter)) != nullptr) {
@@ -925,15 +926,40 @@ bool ESPSystem::InitBallFieldOffsets(Il2CppClass* ballClass) {
         m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
             char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
 
-        if (strcmp(fname, "Radius") == 0) m_offsets.ball_radius = offset;
-        else if (strcmp(fname, "SelfTF") == 0) m_offsets.ball_self_tf = offset;
-        else if (strcmp(fname, "ID") == 0) m_offsets.ball_id = offset;
-        else if (strcmp(fname, "curScore") == 0) m_offsets.ball_score = offset;
-        else if (strcmp(fname, "pos") == 0) m_offsets.ball_pos = offset;
+        // 半径字段 (多种命名)
+        if (strcmp(fname, "Radius") == 0 || strcmp(fname, "radius") == 0 ||
+            strcmp(fname, "Size") == 0 || strcmp(fname, "size") == 0 ||
+            strcmp(fname, "mass") == 0) {
+            m_offsets.ball_radius = offset;
+        }
+        // Transform 引用字段 (用于获取世界坐标)
+        else if (strcmp(fname, "SelfTF") == 0 || strcmp(fname, "selfTF") == 0 ||
+                 strcmp(fname, "tf") == 0 || strcmp(fname, "TF") == 0 ||
+                 strcmp(fname, "transform") == 0 || strcmp(fname, "Transform") == 0 ||
+                 strcmp(fname, "selfTf") == 0 || strcmp(fname, "_transform") == 0 ||
+                 strcmp(fname, "m_Transform") == 0 || strcmp(fname, "SelfTf") == 0) {
+            m_offsets.ball_self_tf = offset;
+        }
+        // ID 字段
+        else if (strcmp(fname, "ID") == 0 || strcmp(fname, "id") == 0 ||
+                 strcmp(fname, "ballId") == 0 || strcmp(fname, "BallID") == 0 ||
+                 strcmp(fname, "Ballid") == 0 || strcmp(fname, "Id") == 0) {
+            m_offsets.ball_id = offset;
+        }
+        // 分数字段
+        else if (strcmp(fname, "curScore") == 0 || strcmp(fname, "score") == 0 ||
+                 strcmp(fname, "Score") == 0 || strcmp(fname, "weight") == 0) {
+            m_offsets.ball_score = offset;
+        }
+        // pos 字段 (Vector3, 通常值为 0, 位置在 Transform 里)
+        else if (strcmp(fname, "pos") == 0 || strcmp(fname, "Pos") == 0 ||
+                 strcmp(fname, "_pos") == 0 || strcmp(fname, "position") == 0) {
+            m_offsets.ball_pos = offset;
+        }
     }
-    APP_LOGI("ESP", "Ball 偏移: radius=0x%zu self_tf=0x%zu id=0x%zu score=0x%zu",
+    APP_LOGI("ESP", "Ball 偏移: radius=0x%zu self_tf=0x%zu id=0x%zu score=0x%zu pos=0x%zu",
         m_offsets.ball_radius, m_offsets.ball_self_tf,
-        m_offsets.ball_id, m_offsets.ball_score);
+        m_offsets.ball_id, m_offsets.ball_score, m_offsets.ball_pos);
     return m_offsets.ball_radius != 0;
 }
 
@@ -1010,6 +1036,23 @@ void ESPSystem::FillBallObject(Il2CppObject* ballObj, int selfPlayerId,
     if (!ballObj) return;
     GameObjectInfo info;
 
+    // 首次遇到 ball 对象时, 用 object_get_class 拿真实类并解析字段偏移
+    // 解决问题: BallDic 里的对象类名未知 (可能不叫 "Ball"),
+    //          之前 FindBallAndTransformClasses 在 BallDic 空时没找到类
+    if (m_offsets.ball_radius == 0 && m_offsets.ball_self_tf == 0) {
+        Il2CppClass* bc = m_fn_object_get_class(ballObj);
+        if (bc) {
+            const char* cn = m_fn_class_get_name ? m_fn_class_get_name(bc) : "?";
+            APP_LOGW("ESP", "Ball 偏移未初始化! 首对象类=%s, 现场解析字段...", cn ? cn : "?");
+            m_classBall = bc;
+            InitBallFieldOffsets(bc);
+            // 同时补查 Transform 类和方法 (如果还没查)
+            if (!m_methodGetPosition) {
+                FindBallAndTransformClasses();
+            }
+        }
+    }
+
     // 读 Radius
     if (m_offsets.ball_radius) {
         info.radius = *(float*)((char*)ballObj + m_offsets.ball_radius);
@@ -1026,6 +1069,12 @@ void ESPSystem::FillBallObject(Il2CppObject* ballObj, int selfPlayerId,
                 info.world_z = tz;
             }
         }
+    } else if (m_offsets.ball_pos) {
+        // 备用: 直接读 pos 字段 (Vector3)
+        float* p = (float*)((char*)ballObj + m_offsets.ball_pos);
+        info.world_x = p[0];
+        info.world_y = p[1];
+        info.world_z = p[2];
     }
 
     // 读 ID
