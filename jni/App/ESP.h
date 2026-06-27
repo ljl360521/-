@@ -302,6 +302,14 @@ private:
     MethodInfo* m_methodGetCurrent;
     MethodInfo* m_methodGetName;
 
+    // 相机方法缓存 (避免每帧 class_get_method_from_name 字符串查找, 减少抖动)
+    // 修复: 之前每帧重新查找相机方法, 且 orthographicSize 只读一次,
+    //       导致大鱼吃小鱼游戏中玩家变大时视野缩放变化, ESP 圆圈位置/半径错位闪烁
+    MethodInfo* m_methodGetOrthoSize;    // Camera.get_orthographicSize (每帧重读, 视野会动态变化)
+    MethodInfo* m_methodGetTransform;    // Camera.get_transform (Component.get_transform)
+    MethodInfo* m_methodGetPosition;     // Transform.get_position
+    Il2CppClass* m_classTransformCached; // Transform 类缓存 (避免每帧 object_get_class 后再查方法)
+
     // 字段偏移
     FieldOffsets m_offsets;         // PlayerBase 偏移
     FieldOffsets m_ballOffsets;     // Ball 偏移 (独立解析, 字段布局可能不同)
@@ -316,6 +324,7 @@ private:
     // 游戏对象列表
     std::mutex m_objectMutex;
     std::vector<GameObjectInfo> m_objects;
+    uint32_t m_emptyFrameCount;  // 连续空列表帧计数 (防闪烁: 瞬时读取失败保留旧数据)
 
     // 相机信息
     CameraInfo m_camera;

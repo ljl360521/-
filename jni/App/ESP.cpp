@@ -84,8 +84,10 @@ ESPSystem::ESPSystem()
       m_imageCSharp(nullptr), m_imageUnityEngine(nullptr), m_domain(nullptr),
       m_methodGetInstance(nullptr), m_methodGetCurrent(nullptr),
       m_methodGetName(nullptr),
+      m_methodGetOrthoSize(nullptr), m_methodGetTransform(nullptr),
+      m_methodGetPosition(nullptr), m_classTransformCached(nullptr),
       m_gameReady(false), m_threadAttached(false), m_counter(0), m_pcounter(0),
-      m_gameInstance(nullptr) {}
+      m_gameInstance(nullptr), m_emptyFrameCount(0) {}
 
 // =============================================================================
 // IL2CPP 初始化 — dlopen libil2cpp.so + 解析函数符号
@@ -907,50 +909,57 @@ void ESPSystem::ReadCameraInfo() {
     //   Camera.get_transform()        → Transform
     //   Transform.get_position()      → Vector3 (相机世界坐标)
 
-    // 读 orthographicSize
-    if (m_camera.zoom <= 0) {
-        MethodInfo* mGetOrtho = m_fn_class_get_method_from_name(camClass, "get_orthographicSize", 0);
-        if (mGetOrtho) {
-            Il2CppException* e2 = nullptr;
-            Il2CppObject* ret = m_fn_runtime_invoke(mGetOrtho, camObj, nullptr, &e2);
-            if (ret && !e2) {
-                // 返回值是 float, 装箱为 object (Il2CppObject 头 16 字节 + float 4 字节)
-                float val = *(float*)((char*)ret + 16);
-                if (val > 0) {
-                    m_camera.zoom = val;
-                    static bool s_loggedOrtho = false;
-                    if (!s_loggedOrtho) {
-                        APP_LOGI("ESP", "✓ Camera.orthographicSize = %.2f", val);
-                        s_loggedOrtho = true;
-                    }
+    // 读 orthographicSize —— 每帧重读!
+    // 修复: 大鱼吃小鱼游戏中玩家变大时相机 orthographicSize 动态增大 (视野拉远),
+    //       之前只在首帧读取导致 zoom 冻结, scale 错误 → 圆圈不贴合球体 + 闪烁
+    if (!m_methodGetOrthoSize) {
+        m_methodGetOrthoSize = m_fn_class_get_method_from_name(camClass, "get_orthographicSize", 0);
+    }
+    if (m_methodGetOrthoSize) {
+        Il2CppException* e2 = nullptr;
+        Il2CppObject* ret = m_fn_runtime_invoke(m_methodGetOrthoSize, camObj, nullptr, &e2);
+        if (ret && !e2) {
+            // 返回值是 float, 装箱为 object (Il2CppObject 头 16 字节 + float 4 字节)
+            float val = *(float*)((char*)ret + 16);
+            if (val > 0) {
+                m_camera.zoom = val;  // 每帧更新 (视野动态变化的核心)
+                static bool s_loggedOrtho = false;
+                if (!s_loggedOrtho) {
+                    APP_LOGI("ESP", "✓ Camera.orthographicSize = %.2f (每帧动态读取)", val);
+                    s_loggedOrtho = true;
                 }
             }
         }
     }
 
-    // 读 transform.position (相机世界坐标)
-    MethodInfo* mGetTransform = m_fn_class_get_method_from_name(camClass, "get_transform", 0);
-    if (mGetTransform) {
+    // 读 transform.position (相机世界坐标) —— 用缓存方法指针
+    if (!m_methodGetTransform) {
+        m_methodGetTransform = m_fn_class_get_method_from_name(camClass, "get_transform", 0);
+    }
+    if (m_methodGetTransform) {
         Il2CppException* e3 = nullptr;
-        Il2CppObject* transObj = m_fn_runtime_invoke(mGetTransform, camObj, nullptr, &e3);
+        Il2CppObject* transObj = m_fn_runtime_invoke(m_methodGetTransform, camObj, nullptr, &e3);
         if (transObj && !e3) {
-            Il2CppClass* transClass = m_fn_object_get_class(transObj);
-            if (transClass) {
-                MethodInfo* mGetPos = m_fn_class_get_method_from_name(transClass, "get_position", 0);
-                if (mGetPos) {
-                    Il2CppException* e4 = nullptr;
-                    Il2CppObject* posObj = m_fn_runtime_invoke(mGetPos, transObj, nullptr, &e4);
-                    if (posObj && !e4) {
-                        // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
-                        float px = *(float*)((char*)posObj + 16);
-                        float py = *(float*)((char*)posObj + 20);
-                        m_camera.cam_x = px;
-                        m_camera.cam_y = py;
-                        static bool s_loggedPos = false;
-                        if (!s_loggedPos) {
-                            APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
-                            s_loggedPos = true;
-                        }
+            // 缓存 Transform 类 + get_position 方法 (所有 Transform 实例共享同一类)
+            if (!m_classTransformCached || !m_methodGetPosition) {
+                m_classTransformCached = m_fn_object_get_class(transObj);
+                if (m_classTransformCached) {
+                    m_methodGetPosition = m_fn_class_get_method_from_name(m_classTransformCached, "get_position", 0);
+                }
+            }
+            if (m_methodGetPosition) {
+                Il2CppException* e4 = nullptr;
+                Il2CppObject* posObj = m_fn_runtime_invoke(m_methodGetPosition, transObj, nullptr, &e4);
+                if (posObj && !e4) {
+                    // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
+                    float px = *(float*)((char*)posObj + 16);
+                    float py = *(float*)((char*)posObj + 20);
+                    m_camera.cam_x = px;
+                    m_camera.cam_y = py;
+                    static bool s_loggedPos = false;
+                    if (!s_loggedPos) {
+                        APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
+                        s_loggedPos = true;
                     }
                 }
             }
@@ -1252,10 +1261,17 @@ void ESPSystem::ReadGameObjects() {
     // 兼容: 读取细胞列表 (用 PlayerBase 偏移)
     readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
 
-    // 更新缓存
+    // 更新缓存 (防闪烁: 瞬时读取失败导致空列表时保留上一帧数据, 避免那一帧不画而闪烁)
     {
         std::lock_guard<std::mutex> lock(m_objectMutex);
-        m_objects = std::move(newObjects);
+        if (!newObjects.empty()) {
+            m_objects = std::move(newObjects);
+            m_emptyFrameCount = 0;
+        } else if (++m_emptyFrameCount > 30) {
+            // 连续 30 帧 (约 0.5s) 空列表才真正清空, 处理游戏退出/切场景
+            m_objects.clear();
+        }
+        // 否则保留 m_objects 上一帧数据, 避免单帧读取失败导致闪烁
     }
 
     // 更新诊断状态 + 详细日志 (每 60 帧约 1 秒)

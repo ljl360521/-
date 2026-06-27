@@ -251,7 +251,7 @@ static void DrawESPTab() {
         if (ImGui::TreeNode("参数")) {
             ImGui::SliderFloat("圆圈线宽", &cfg.circle_thickness, 0.5f, 8.0f);
             ImGui::SliderInt("圆圈分段",   &cfg.circle_segments, 6, 64);
-            ImGui::SliderFloat("缩放微调", &cfg.zoom_scale, 0.1f, 5.0f, "%.2f");
+            ImGui::SliderFloat("缩放微调", &cfg.circle_scale, 0.1f, 5.0f, "%.2f");
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
