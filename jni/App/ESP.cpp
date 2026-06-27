@@ -86,6 +86,7 @@ ESPSystem::ESPSystem()
       m_methodGetName(nullptr),
       m_methodGetOrthoSize(nullptr), m_methodGetTransform(nullptr),
       m_methodGetPosition(nullptr), m_classTransformCached(nullptr),
+      m_classObjTransformCached(nullptr), m_methodObjGetPosition(nullptr),
       m_gameReady(false), m_threadAttached(false), m_counter(0), m_pcounter(0),
       m_gameInstance(nullptr), m_emptyFrameCount(0) {}
 
@@ -999,10 +1000,18 @@ bool ESPSystem::ReadObjectPositionViaTransform(Il2CppObject* obj, size_t transfo
     Il2CppObject* tfObj = *(Il2CppObject**)((char*)obj + transformOffset);
     if (!tfObj) return false;
 
-    // 2. 拿 Transform 类, 找 get_position 方法 (0 参数, 返回 Vector3)
-    Il2CppClass* tfClass = m_fn_object_get_class(tfObj);
-    if (!tfClass) return false;
-    MethodInfo* mGetPos = m_fn_class_get_method_from_name(tfClass, "get_position", 0);
+    // 2. 拿 get_position 方法 —— 用缓存! (修复闪烁根因)
+    // 之前每个对象都做 object_get_class + class_get_method_from_name("get_position"),
+    // 这是字符串遍历查找, 几十个球每帧几十次 → 帧率抖动 → 圆圈闪烁
+    // 所有 Ball 的 Transform 都是同一个类 (UnityEngine.Transform), 首次查找后缓存复用
+    MethodInfo* mGetPos = m_methodObjGetPosition;
+    if (!mGetPos) {
+        Il2CppClass* tfClass = m_fn_object_get_class(tfObj);
+        if (!tfClass) return false;
+        m_classObjTransformCached = tfClass;
+        mGetPos = m_fn_class_get_method_from_name(tfClass, "get_position", 0);
+        m_methodObjGetPosition = mGetPos;  // 缓存 (后续所有对象复用)
+    }
     if (!mGetPos) return false;
 
     // 3. 调用 get_position
@@ -1191,8 +1200,12 @@ void ESPSystem::ReadGameObjects() {
     };
 
     // 读取玩家字典 (PlayerDic) — 用 PlayerBase 偏移
-    size_t playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
-                                              m_offsets.gcc_player_list, "PlayerDic", m_offsets);
+    // draw_players 开关: PlayerBase 位置是玩家质心, 大鱼吃小鱼里不贴合单个球, 默认关
+    size_t playerCount = 0;
+    if (config.draw_players) {
+        playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
+                                         m_offsets.gcc_player_list, "PlayerDic", m_offsets);
+    }
 
     // --- BallDic 动态类识别 ---
     // BallDic 里的对象类名可能不叫 "Ball" (FindGameClasses 找不到),
@@ -1256,10 +1269,16 @@ void ESPSystem::ReadGameObjects() {
     }
 
     // 读取球字典 (BallDic) — 用 Ball 偏移 (关键: Ball 字段布局和 PlayerBase 不同!)
-    size_t ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
-                                            m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
+    // draw_balls 开关: 球是视觉实际看到的对象, 位置贴合, 默认开
+    size_t ballCount = 0;
+    if (config.draw_balls) {
+        ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
+                                       m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
+    }
     // 兼容: 读取细胞列表 (用 PlayerBase 偏移)
-    readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
+    if (config.draw_players) {
+        readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
+    }
 
     // 更新缓存 (防闪烁: 瞬时读取失败导致空列表时保留上一帧数据, 避免那一帧不画而闪烁)
     {

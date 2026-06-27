@@ -232,6 +232,12 @@ static void DrawESPTab() {
             ImGui::Checkbox("半径",   &cfg.show_radius);
             ImGui::Checkbox("距离",   &cfg.show_distance);
             ImGui::Checkbox("自身标记", &cfg.show_self_marker);
+            ImGui::Separator();
+            ImGui::Checkbox("画球(贴合)", &cfg.draw_balls);
+            ImGui::SameLine();
+            ImGui::Checkbox("画玩家(质心)", &cfg.draw_players);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("球=视觉实际看到的目标, 位置贴合\n玩家=质心, 大鱼吃小鱼里不贴合单个球\n默认只画球");
             ImGui::TreePop();
         }
 

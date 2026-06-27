@@ -112,6 +112,11 @@ struct ESPConfig {
     bool show_distance;         // 显示距离
     bool show_self_marker;      // 自身额外标记 (对应 draw_circle.rs 的 is_self 圈)
 
+    // 数据源开关 (修复"不贴合球体": 大鱼吃小鱼视觉看到的是球 Ball,
+    //   PlayerBase 位置是玩家质心不贴合任何单个球, 默认只画球)
+    bool draw_players;          // 画玩家 (PlayerDic, 位置=质心, 可能不贴合)
+    bool draw_balls;            // 画球 (BallDic, 位置=每个球实际位置, 贴合)
+
     // 颜色配置 (逆向: "draw_color", "name_color")
     ImU32 circle_color;         // 圆圈颜色
     ImU32 name_color;           // 名称颜色
@@ -146,6 +151,7 @@ struct ESPConfig {
         draw_enabled(false), show_circle(true), show_name(true),
         show_tracer(false), show_id(false), show_score(false),
         show_radius(false), show_distance(false), show_self_marker(true),
+        draw_players(false), draw_balls(true),
         circle_color(IM_COL32(0, 255, 0, 255)),
         name_color(IM_COL32(255, 255, 0, 255)),
         tracer_color(IM_COL32(255, 0, 0, 128)),
@@ -309,6 +315,11 @@ private:
     MethodInfo* m_methodGetTransform;    // Camera.get_transform (Component.get_transform)
     MethodInfo* m_methodGetPosition;     // Transform.get_position
     Il2CppClass* m_classTransformCached; // Transform 类缓存 (避免每帧 object_get_class 后再查方法)
+
+    // 对象坐标读取的方法缓存 (修复闪烁: 之前每个对象都做 class_get_method_from_name
+    //   字符串查找 get_position, 几十个球每帧几十次遍历 → 帧率抖动 → 圆圈闪烁)
+    Il2CppClass* m_classObjTransformCached;  // 对象 Transform 类缓存 (所有球共享同一类)
+    MethodInfo*  m_methodObjGetPosition;     // 对象 Transform.get_position 缓存
 
     // 字段偏移
     FieldOffsets m_offsets;         // PlayerBase 偏移
