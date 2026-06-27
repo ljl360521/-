@@ -19,13 +19,23 @@
 #include "app_log.h"
 
 // =============================================================================
-// IL2CPP 托管字符串 → UTF8 转换辅助函数
-// 手动 UTF16 → UTF8 (替代旧版 il2cpp_string_to_utf8, 该符号在部分 IL2CPP 版本不可用)
+// IL2CPP 托管字符串 → UTF8 转换辅助
+// il2cpp_string_to_utf8 在部分 IL2CPP 版本不导出, 用 string_chars+string_length 兜底
+// 手动 UTF16 → UTF8 (BMP 基本多文种平面, 不处理 surrogate pair — 玩家名足够)
 // =============================================================================
-
-static std::string Il2CppStringToUtf8Impl(const Il2CppString* str,
-    il2cpp_string_chars_t charsFn, il2cpp_string_length_t lenFn) {
-    if (!str || !charsFn || !lenFn) return "";
+static std::string Il2CppStringToUtf8(const Il2CppString* str,
+    il2cpp_string_to_utf8_t utf8Fn,
+    il2cpp_string_chars_t charsFn,
+    il2cpp_string_length_t lenFn) {
+    if (!str) return "";
+    // 优先用原生 API (如果导出)
+    if (utf8Fn) {
+        // IL2CPP API 签名是非 const Il2CppString*, 这里 const_cast 兼容
+        const char* utf8 = utf8Fn(const_cast<Il2CppString*>(str));
+        if (utf8) return std::string(utf8);
+    }
+    // 兜底: 用 chars + length 手动 UTF16→UTF8
+    if (!charsFn || !lenFn) return "";
     int len = lenFn(str);
     const uint16_t* chars = charsFn(str);
     if (!chars || len <= 0) return "";
@@ -47,38 +57,6 @@ static std::string Il2CppStringToUtf8Impl(const Il2CppString* str,
     return result;
 }
 
-// IL2CPP 数组元素数据起始偏移 (64位=32, 32位=16; 等于 4 * sizeof(void*))
-// Il2CppArray 布局: { vtable, monitor, bounds*, max_length, [pad], data[] }
-static const size_t kIl2CppArrayDataOffset = 4 * sizeof(void*);
-
-// -----------------------------------------------------------------------------
-// 动态查找 Dictionary<int,T> 内部偏移 (_entries / _count)
-// 通过遍历 Dictionary 对象的类字段按名匹配, 未找到则用日志确认的默认值。
-// entry 布局: { int hashCode(0); int next(4); int key(8); [pad]; T value }
-//   value 偏移 = 12 向上对齐到 sizeof(void*); entry 大小 = value偏移 + sizeof(void*)
-//   (64位: value@16, entry=24; 32位: value@12, entry=16 — 与日志确认的 24/16 一致)
-// -----------------------------------------------------------------------------
-static void DiscoverDicOffsets(void* dicObj, FieldOffsets& off,
-    il2cpp_object_get_class_t objGetClass,
-    il2cpp_class_get_fields_t classGetFields,
-    il2cpp_field_get_name_t fieldGetName,
-    il2cpp_field_get_offset_t fieldGetOffset) {
-    if (off.dic_entries != 0 || !dicObj || !objGetClass) return;  // 已发现
-    Il2CppClass* dicClass = objGetClass((Il2CppObject*)dicObj);
-    if (!dicClass) return;
-    void* iter = nullptr;
-    FieldInfo* field;
-    while ((field = classGetFields(dicClass, &iter)) != nullptr) {
-        const char* fname = fieldGetName(field);
-        size_t offset = fieldGetOffset(field);
-        if (!fname) continue;
-        if (strcmp(fname, "_entries") == 0) off.dic_entries = offset;
-        else if (strcmp(fname, "_count") == 0) off.dic_count = offset;
-    }
-    if (off.dic_entries == 0) off.dic_entries = 0x18;  // 日志确认默认值
-    if (off.dic_count == 0) off.dic_count = 0x20;
-}
-
 // =============================================================================
 // 单例
 // =============================================================================
@@ -93,20 +71,19 @@ ESPSystem::ESPSystem()
       m_fn_domain_get(nullptr), m_fn_domain_get_assemblies(nullptr),
       m_fn_assembly_get_image(nullptr), m_fn_class_from_name(nullptr),
       m_fn_class_get_fields(nullptr), m_fn_field_get_name(nullptr),
-      m_fn_field_get_offset(nullptr), m_fn_class_get_method(nullptr),
+      m_fn_field_get_offset(nullptr), m_fn_class_get_method_from_name(nullptr),
       m_fn_runtime_invoke(nullptr), m_fn_array_length(nullptr),
       m_fn_array_get(nullptr), m_fn_object_get_class(nullptr),
-      m_fn_string_chars(nullptr), m_fn_string_length(nullptr),
-      m_fn_string_new(nullptr),
+      m_fn_string_to_utf8(nullptr), m_fn_string_chars(nullptr),
+      m_fn_string_length(nullptr), m_fn_string_new(nullptr),
       m_fn_class_get_name(nullptr), m_fn_image_get_name(nullptr),
       m_fn_thread_attach(nullptr), m_fn_domain_assembly_open(nullptr),
       m_fn_image_get_class_count(nullptr), m_fn_image_get_class(nullptr),
       m_classGameCoreCenter(nullptr), m_classPlayerBase(nullptr),
-      m_classCamera(nullptr), m_classBall(nullptr), m_classTransform(nullptr),
-      m_imageCSharp(nullptr), m_domain(nullptr),
+      m_classBall(nullptr), m_classCamera(nullptr),
+      m_imageCSharp(nullptr), m_imageUnityEngine(nullptr), m_domain(nullptr),
       m_methodGetInstance(nullptr), m_methodGetCurrent(nullptr),
-      m_methodGetName(nullptr), m_methodGetPosition(nullptr),
-      m_methodGetOrthographicSize(nullptr),
+      m_methodGetName(nullptr),
       m_gameReady(false), m_threadAttached(false), m_counter(0), m_pcounter(0),
       m_gameInstance(nullptr) {}
 
@@ -229,13 +206,38 @@ bool ESPSystem::ResolveIL2CPPFunctions() {
     ESP_RESOLVE(class_get_fields,      il2cpp_class_get_fields_t);
     ESP_RESOLVE(field_get_name,        il2cpp_field_get_name_t);
     ESP_RESOLVE(field_get_offset,      il2cpp_field_get_offset_t);
-    ESP_RESOLVE(class_get_method, il2cpp_class_get_method_from_name_t);
+    ESP_RESOLVE(class_get_method_from_name, il2cpp_class_get_method_from_name_t);
     ESP_RESOLVE(runtime_invoke,        il2cpp_runtime_invoke_t);
     ESP_RESOLVE(array_length,          il2cpp_array_length_t);
-    ESP_RESOLVE(array_get,             il2cpp_array_get_t);
+    // il2cpp_array_get 在 IL2CPP 中通常不导出 (只有 il2cpp_array_length / il2cpp_array_unbox)
+    // 改为可选解析: 找不到不报错, 用直接内存偏移读取数组元素 (数据起始 = 4*sizeof(void*))
+    if (m_il2cppBase != 0) {
+        m_fn_array_get = (il2cpp_array_get_t)ELFResolver::LookupSymbol(m_il2cppBase, "il2cpp_array_get");
+    }
+    if (!m_fn_array_get && m_il2cppHandle) {
+        m_fn_array_get = (il2cpp_array_get_t)dlsym(m_il2cppHandle, "il2cpp_array_get");
+    }
+    if (m_fn_array_get) {
+        APP_LOGI("ESP", "  ✓ [可选] il2cpp_array_get 已解析 @ %p (将用 API)", (void*)m_fn_array_get);
+    } else {
+        APP_LOGW("ESP", "  ! [可选] il2cpp_array_get 未导出 — 将用直接内存偏移读取数组 (数据起始=4*sizeof(void*))");
+    }
     ESP_RESOLVE(object_get_class,      il2cpp_object_get_class_t);
+    // il2cpp_string_to_utf8 在部分 IL2CPP 版本不导出, 改为可选
+    // 用 il2cpp_string_chars + il2cpp_string_length 手动 UTF16→UTF8 兜底
     ESP_RESOLVE(string_chars,          il2cpp_string_chars_t);
     ESP_RESOLVE(string_length,         il2cpp_string_length_t);
+    if (m_il2cppBase != 0) {
+        m_fn_string_to_utf8 = (il2cpp_string_to_utf8_t)ELFResolver::LookupSymbol(m_il2cppBase, "il2cpp_string_to_utf8");
+    }
+    if (!m_fn_string_to_utf8 && m_il2cppHandle) {
+        m_fn_string_to_utf8 = (il2cpp_string_to_utf8_t)dlsym(m_il2cppHandle, "il2cpp_string_to_utf8");
+    }
+    if (m_fn_string_to_utf8) {
+        APP_LOGI("ESP", "  ✓ [可选] il2cpp_string_to_utf8 已解析 @ %p", (void*)m_fn_string_to_utf8);
+    } else {
+        APP_LOGW("ESP", "  ! [可选] il2cpp_string_to_utf8 未导出 — 将用 string_chars+string_length 手动转 UTF8");
+    }
     ESP_RESOLVE(string_new,            il2cpp_string_new_t);
     ESP_RESOLVE(class_get_name,        il2cpp_class_get_name_t);
     ESP_RESOLVE(image_get_name,        il2cpp_image_get_name_t);
@@ -275,15 +277,47 @@ bool ESPSystem::FindGameClasses() {
     }
     APP_LOGI("ESP", "il2cpp_domain_get() 成功, domain=%p", (void*)m_domain);
 
+    // 关键: 在调用任何 IL2CPP 反射 API (class_from_name/runtime_invoke 等) 之前,
+    // 必须先把当前线程 attach 到 IL2CPP 运行时, 否则 class_from_name 会返回 null。
+    // 对应 game_direct_call.rs:440 api.attach_thread(domain) — 在 find_class 之前执行。
+    if (!m_threadAttached.load() && m_fn_thread_attach) {
+        void* thread = m_fn_thread_attach(m_domain);
+        if (thread) {
+            m_threadAttached.store(true);
+            ESP_LOGI("ESP: + 当前线程已 attach 到 IL2CPP (thread=%p) — 在 FindGameClasses 之前", thread);
+            APP_LOGI("ESP", "✓ 当前线程已 attach 到 IL2CPP (thread=%p) — 在查找类之前", thread);
+        } else {
+            m_diagStatus = "失败: il2cpp_thread_attach 返回 null";
+            ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+            APP_LOGE("ESP", "il2cpp_thread_attach 失败 — 无法 attach 到 IL2CPP, class_from_name 将失败");
+            return false;
+        }
+    }
+
     // 方式 1 (优先): 用 domain_assembly_open 直接打开 Assembly-CSharp
     // 对应 game_direct_call.rs 的 open_assembly_image(domain, "Assembly-CSharp")
+    // 但注意: 某些游戏把代码拆到别的程序集, Assembly-CSharp 可能只含框架类
+    // 所以方式1拿到 image 后必须先验证里面有没有 GameCoreCenter, 没有就走方式2
     if (m_fn_domain_assembly_open) {
         APP_LOGI("ESP", "尝试 domain_assembly_open(\"Assembly-CSharp\")...");
         const Il2CppAssembly* assembly = m_fn_domain_assembly_open(m_domain, "Assembly-CSharp");
         if (assembly) {
-            m_imageCSharp = m_fn_assembly_get_image(assembly);
-            ESP_LOGI("ESP: + domain_assembly_open 成功打开 Assembly-CSharp, image=%p", (void*)m_imageCSharp);
-            APP_LOGI("ESP", "domain_assembly_open 成功, image=%p", (void*)m_imageCSharp);
+            Il2CppImage* img = m_fn_assembly_get_image(assembly);
+            APP_LOGI("ESP", "domain_assembly_open 成功, image=%p", (void*)img);
+            // 关键: 验证这个 image 里是否真的有 GameCoreCenter
+            // 日志显示 Assembly-CSharp 可能只含 14 个框架类, 游戏代码在别的程序集
+            if (img && m_fn_class_from_name) {
+                Il2CppClass* testClass = m_fn_class_from_name(img, "", "GameCoreCenter");
+                if (testClass) {
+                    m_imageCSharp = img;
+                    m_classGameCoreCenter = testClass;
+                    APP_LOGI("ESP", "✓ Assembly-CSharp 含 GameCoreCenter (class=%p)", (void*)testClass);
+                } else {
+                    size_t cc = m_fn_image_get_class_count ? m_fn_image_get_class_count(img) : 0;
+                    APP_LOGW("ESP", "Assembly-CSharp 里没有 GameCoreCenter (只有 %zu 个类), 改用遍历方式找游戏程序集", cc);
+                    // 不设置 m_imageCSharp, 让方式2遍历所有程序集
+                }
+            }
         } else {
             ESP_LOGW("ESP: domain_assembly_open(\"Assembly-CSharp\") 返回 null, 尝试遍历方式...");
             APP_LOGW("ESP", "domain_assembly_open 返回 null, 改用遍历方式");
@@ -292,7 +326,8 @@ bool ESPSystem::FindGameClasses() {
         APP_LOGW("ESP", "domain_assembly_open 函数指针为空, 跳过此方式");
     }
 
-    // 方式 2 (兜底): 遍历所有程序集查找包含 GameCoreCenter 的 image
+    // 方式 2 (兜底/主): 遍历所有程序集查找包含 GameCoreCenter 的 image
+    // 当方式1失败或 Assembly-CSharp 不含游戏类时执行
     if (!m_imageCSharp) {
         size_t count = 0;
         const Il2CppAssembly** assemblies = m_fn_domain_get_assemblies(m_domain, &count);
@@ -302,31 +337,39 @@ bool ESPSystem::FindGameClasses() {
             APP_LOGE("ESP", "domain_get_assemblies 返回空 (count=%zu, ptr=%p)", count, (void*)assemblies);
             return false;
         }
-        ESP_LOGI("ESP: 共 %zu 个程序集, 遍历查找 Assembly-CSharp...", count);
+        ESP_LOGI("ESP: 共 %zu 个程序集, 遍历查找 GameCoreCenter...", count);
         APP_LOGI("ESP", "共 %zu 个程序集, 遍历查找含 GameCoreCenter 的 image", count);
+
+        // 首次遍历打印所有非系统程序集名 + 类数量 (诊断用, 仅一次)
+        static bool s_dumpedAsms = false;
 
         for (size_t i = 0; i < count; i++) {
             if (!assemblies[i]) continue;
             Il2CppImage* img = m_fn_assembly_get_image(assemblies[i]);
             if (!img) continue;
 
-            // 打印每个 image 的名字帮助诊断
+            // 打印每个 image 的名字 + 类数量帮助诊断
             const char* imgName = m_fn_image_get_name ? m_fn_image_get_name(img) : nullptr;
-            if (imgName) {
-                // 仅打印非系统程序集, 避免日志过多
-                if (strstr(imgName, "mscorlib")==nullptr && strstr(imgName, "System")==nullptr &&
-                    strstr(imgName, "UnityEngine")==nullptr) {
-                    APP_LOGI("ESP", "  程序集 #%zu: %s", i, imgName);
-                }
+            size_t classCount = m_fn_image_get_class_count ? m_fn_image_get_class_count(img) : 0;
+            if (imgName && !s_dumpedAsms) {
+                // 打印所有程序集 (含系统, 让用户看到全貌)
+                APP_LOGI("ESP", "  程序集 #%zu: %s (类数=%zu)", i, imgName, classCount);
             }
+
+            // 在这个 image 里查找 GameCoreCenter
             Il2CppClass* testClass = m_fn_class_from_name(img, "", "GameCoreCenter");
             if (testClass) {
                 m_imageCSharp = img;
+                m_classGameCoreCenter = testClass;
                 ESP_LOGI("ESP: + 在程序集 #%zu (%s) 中找到 GameCoreCenter", i, imgName ? imgName : "?");
                 APP_LOGI("ESP", "✓ 在程序集 #%zu (%s) 中找到 GameCoreCenter, image=%p",
                     i, imgName ? imgName : "?", (void*)img);
                 break;
             }
+        }
+        if (!s_dumpedAsms) {
+            APP_LOGI("ESP", "=== 程序集列表转储完成 (%zu 个, 后续重试不再转储) ===", count);
+            s_dumpedAsms = true;
         }
     }
 
@@ -339,15 +382,71 @@ bool ESPSystem::FindGameClasses() {
     }
 
     // --- 查找 GameCoreCenter (全局命名空间 "") ---
-    m_classGameCoreCenter = m_fn_class_from_name(m_imageCSharp, "", "GameCoreCenter");
+    // 如果方式1/方式2已经找到, 直接用; 否则重新查找
+    if (!m_classGameCoreCenter) {
+        m_classGameCoreCenter = m_fn_class_from_name(m_imageCSharp, "", "GameCoreCenter");
+    }
     if (m_classGameCoreCenter) {
         ESP_LOGI("ESP: + 找到 GameCoreCenter (namespace=\"\")");
         APP_LOGI("ESP", "✓ 找到类 GameCoreCenter (namespace=\"\", class=%p)", (void*)m_classGameCoreCenter);
     } else {
-        m_diagStatus = "失败: GameCoreCenter 类未找到";
-        ESP_LOGE("ESP: %s", m_diagStatus.c_str());
-        APP_LOGE("ESP", "GameCoreCenter 类查找失败");
-        return false;
+        // 全局命名空间找不到, 遍历 image 所有类帮助诊断
+        ESP_LOGW("ESP: GameCoreCenter (namespace=\"\") 未找到, 遍历 image 类列表...");
+        APP_LOGW("ESP", "GameCoreCenter 在全局命名空间未找到, 遍历 Assembly-CSharp 所有类");
+
+        // 尝试用 image_get_class 遍历所有类, 打印类名 + 尝试模糊匹配
+        // 注意: 只在首次失败时转储完整列表, 避免重试时日志刷屏
+        static bool s_dumpedClasses = false;
+        if (m_fn_image_get_class_count && m_fn_image_get_class && m_fn_class_get_name) {
+            size_t classCount = m_fn_image_get_class_count(m_imageCSharp);
+
+            // 模糊匹配候选 (按优先级)
+            const char* matchKeywords[] = {"GameCoreCenter", "GameCore", "CoreCenter",
+                                            "GameManager", "GameCenter", "GameMain",
+                                            "Center", "Manager"};
+            const int nKeywords = sizeof(matchKeywords) / sizeof(matchKeywords[0]);
+
+            for (size_t i = 0; i < classCount; i++) {
+                Il2CppClass* cls = m_fn_image_get_class(m_imageCSharp, i);
+                if (!cls) continue;
+                const char* clsName = m_fn_class_get_name(cls);
+                if (!clsName) continue;
+
+                // 首次失败时打印每个类名 (帮助诊断), 后续重试只做匹配不打印
+                if (!s_dumpedClasses) {
+                    APP_LOGI("ESP", "  类 #%zu: %s", i, clsName);
+                }
+
+                // 尝试精确匹配 "GameCoreCenter" (无论是否转储都要尝试)
+                if (!m_classGameCoreCenter) {
+                    for (int k = 0; k < nKeywords; k++) {
+                        if (strstr(clsName, matchKeywords[k]) != nullptr) {
+                            APP_LOGW("ESP", "  ⚠ 类 #%zu 名字含 '%s': %s (候选?)",
+                                i, matchKeywords[k], clsName);
+                            if (strcmp(clsName, "GameCoreCenter") == 0) {
+                                m_classGameCoreCenter = cls;
+                                ESP_LOGI("ESP: + 精确匹配到 GameCoreCenter (类 #%zu)", i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!s_dumpedClasses) {
+                APP_LOGI("ESP", "=== 类转储完成 (%zu 个, 后续重试不再转储) ===", classCount);
+                s_dumpedClasses = true;
+            }
+        } else {
+            APP_LOGE("ESP", "image_get_class/image_get_class_count/class_get_name 之一为空, 无法遍历");
+        }
+
+        if (!m_classGameCoreCenter) {
+            m_diagStatus = "失败: GameCoreCenter 类未找到 (见日志类列表)";
+            ESP_LOGE("ESP: %s", m_diagStatus.c_str());
+            APP_LOGE("ESP", "GameCoreCenter 类查找失败 — 请检查日志中的类名列表, 类名可能不同");
+            APP_LOGE("ESP", "  可能: 1)类被混淆 2)类名不同 3)在命名空间下 4)游戏未完全加载");
+            return false;
+        }
     }
 
     // --- 查找 PlayerBase (全局命名空间 "") ---
@@ -374,44 +473,94 @@ bool ESPSystem::FindGameClasses() {
         }
     }
 
-    // --- 查找 Camera (命名空间 "UnityEngine"!) ---
-    // 关键修正: Camera 在 UnityEngine 命名空间下, 不是全局命名空间
-    m_classCamera = m_fn_class_from_name(m_imageCSharp, "UnityEngine", "Camera");
-    if (m_classCamera) {
-        ESP_LOGI("ESP: + 找到 UnityEngine.Camera");
-        APP_LOGI("ESP", "✓ 找到类 UnityEngine.Camera (class=%p)", (void*)m_classCamera);
-    } else {
-        ESP_LOGW("ESP: 未找到 UnityEngine.Camera, 尝试全局命名空间...");
-        APP_LOGW("ESP", "未找到 UnityEngine.Camera, 尝试全局命名空间...");
-        m_classCamera = m_fn_class_from_name(m_imageCSharp, "", "Camera");
-        if (m_classCamera) {
-            ESP_LOGI("ESP: + 找到 Camera (全局命名空间)");
-            APP_LOGI("ESP", "✓ 找到 Camera (全局命名空间)");
-        } else {
-            ESP_LOGW("ESP: Camera 未找到, 世界坐标转换将不可用 (ESP 仍可绘制原始坐标)");
-            APP_LOGW("ESP", "Camera 未找到, 世界坐标转换将不可用");
+    // --- 查找 Ball 类 (BallDic 里的对象是 Ball, 不是 PlayerBase!) ---
+    // 日志确认 GameCoreCenter.BallDic @ 0x68 存在, 里面的对象需要单独找类
+    m_classBall = m_fn_class_from_name(m_imageCSharp, "", "Ball");
+    if (!m_classBall) {
+        // 兜底: 尝试其他常见球体类名
+        const char* ballNames[] = {"BallBase", "BallEntity", "GameBall", "Cell", "Fish",
+                                    "BallObject", "BaseBall", "Qiu"};
+        for (const char* name : ballNames) {
+            m_classBall = m_fn_class_from_name(m_imageCSharp, "", name);
+            if (m_classBall) {
+                APP_LOGI("ESP", "✓ 用兜底名 %s 作为 Ball 类", name);
+                break;
+            }
         }
+    }
+    if (m_classBall) {
+        ESP_LOGI("ESP: + 找到 Ball 类");
+        APP_LOGI("ESP", "✓ 找到类 Ball (class=%p) — BallDic 里的对象用这个类的偏移",
+            (void*)m_classBall);
+    } else {
+        ESP_LOGW("ESP: 未找到 Ball 类, BallDic 对象将用 PlayerBase 偏移读取 (可能不准)");
+        APP_LOGW("ESP", "未找到 Ball 类, BallDic 对象将用 PlayerBase 偏移读取 (可能不准)");
+    }
+
+    // --- 查找 Camera (命名空间 "UnityEngine") ---
+    // 关键: Camera 在 UnityEngine.CoreModule.dll, 不在游戏程序集!
+    // 必须遍历所有程序集找 UnityEngine.Camera, 而不是只在 m_imageCSharp 里找
+    m_classCamera = m_fn_class_from_name(m_imageCSharp, "UnityEngine", "Camera");
+    if (!m_classCamera) {
+        // 游戏程序集没有 Camera, 遍历所有程序集找 UnityEngine.CoreModule
+        ESP_LOGW("ESP: 游戏程序集无 Camera, 遍历所有程序集找 UnityEngine.Camera...");
+        APP_LOGW("ESP", "游戏程序集无 UnityEngine.Camera, 遍历所有程序集查找");
+
+        size_t count = 0;
+        const Il2CppAssembly** assemblies = m_fn_domain_get_assemblies(m_domain, &count);
+        for (size_t i = 0; i < count; i++) {
+            if (!assemblies[i]) continue;
+            Il2CppImage* img = m_fn_assembly_get_image(assemblies[i]);
+            if (!img) continue;
+            // 优先找 UnityEngine 命名空间的 Camera
+            Il2CppClass* camClass = m_fn_class_from_name(img, "UnityEngine", "Camera");
+            if (camClass) {
+                m_classCamera = camClass;
+                m_imageUnityEngine = img;
+                const char* imgName = m_fn_image_get_name ? m_fn_image_get_name(img) : "?";
+                ESP_LOGI("ESP: + 在程序集 %s 中找到 UnityEngine.Camera", imgName);
+                APP_LOGI("ESP", "✓ 在程序集 %s 中找到 UnityEngine.Camera (class=%p)",
+                    imgName, (void*)camClass);
+                break;
+            }
+        }
+        // 仍找不到, 尝试全局命名空间
+        if (!m_classCamera) {
+            for (size_t i = 0; i < count; i++) {
+                if (!assemblies[i]) continue;
+                Il2CppImage* img = m_fn_assembly_get_image(assemblies[i]);
+                if (!img) continue;
+                Il2CppClass* camClass = m_fn_class_from_name(img, "", "Camera");
+                if (camClass) {
+                    m_classCamera = camClass;
+                    m_imageUnityEngine = img;
+                    const char* imgName = m_fn_image_get_name ? m_fn_image_get_name(img) : "?";
+                    APP_LOGI("ESP", "✓ 在程序集 %s 中找到 Camera (全局命名空间)", imgName);
+                    break;
+                }
+            }
+        }
+    } else {
+        APP_LOGI("ESP", "✓ 找到类 UnityEngine.Camera (class=%p)", (void*)m_classCamera);
+    }
+    if (!m_classCamera) {
+        ESP_LOGW("ESP: Camera 未找到, 世界坐标转换将用默认 zoom 兜底");
+        APP_LOGW("ESP", "Camera 未找到 (所有程序集都没有), W2S 将用默认 zoom=30 兜底");
     }
 
     // --- 查找方法 (逆向: "get_instance", "get_current", "get_name") ---
     if (m_classGameCoreCenter) {
-        m_methodGetInstance = m_fn_class_get_method(m_classGameCoreCenter, "get_instance", 0);
+        m_methodGetInstance = m_fn_class_get_method_from_name(m_classGameCoreCenter, "get_instance", 0);
         ESP_LOGI("ESP: GameCoreCenter.get_instance = %p", (void*)m_methodGetInstance);
         APP_LOGI("ESP", "GameCoreCenter.get_instance = %p", (void*)m_methodGetInstance);
     }
     if (m_classCamera) {
-        m_methodGetCurrent = m_fn_class_get_method(m_classCamera, "get_current", 0);
+        m_methodGetCurrent = m_fn_class_get_method_from_name(m_classCamera, "get_current", 0);
         ESP_LOGI("ESP: Camera.get_current = %p", (void*)m_methodGetCurrent);
         APP_LOGI("ESP", "Camera.get_current = %p", (void*)m_methodGetCurrent);
-        // 查找 get_orthographicSize (用于读取正交相机缩放, 修复圆圈太小问题)
-        if (!m_methodGetOrthographicSize) {
-            m_methodGetOrthographicSize = m_fn_class_get_method(m_classCamera, "get_orthographicSize", 0);
-            ESP_LOGI("ESP: Camera.get_orthographicSize = %p", (void*)m_methodGetOrthographicSize);
-            APP_LOGI("ESP", "Camera.get_orthographicSize = %p", (void*)m_methodGetOrthographicSize);
-        }
     }
     if (m_classPlayerBase) {
-        m_methodGetName = m_fn_class_get_method(m_classPlayerBase, "get_name", 0);
+        m_methodGetName = m_fn_class_get_method_from_name(m_classPlayerBase, "get_name", 0);
         ESP_LOGI("ESP: PlayerBase.get_name = %p", (void*)m_methodGetName);
         APP_LOGI("ESP", "PlayerBase.get_name = %p", (void*)m_methodGetName);
     }
@@ -435,7 +584,7 @@ bool ESPSystem::InitFieldOffsets() {
     APP_LOGI("ESP", "=== 初始化字段偏移 (打印全部字段) ===");
     m_diagOffsets.clear();
 
-    // --- 遍历 GameCoreCenter 字段 (打印全部, 按日志确认的字段名匹配) ---
+    // --- 遍历 GameCoreCenter 字段 (打印全部) ---
     if (m_classGameCoreCenter) {
         ESP_LOGI("ESP: === GameCoreCenter 全部字段 ===");
         APP_LOGI("ESP", "--- GameCoreCenter 字段 ---");
@@ -452,33 +601,33 @@ bool ESPSystem::InitFieldOffsets() {
             m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
                 char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
 
-            // 按日志确认的字段名匹配 (GameCoreCenter: BobMainScript.dll)
+            // 匹配真实字段名 (从日志确认: PlayerDic/BallDic/SelfPlayerID)
+            // 旧模板字段名 (players/fishList/cells) 作为兜底兼容
             if (strcmp(fname, "PlayerDic") == 0) {
                 m_offsets.gcc_player_dic = offset;
-            } else if (strcmp(fname, "CachedPlayerDic") == 0) {
-                m_offsets.gcc_cached_player_dic = offset;
             } else if (strcmp(fname, "BallDic") == 0) {
                 m_offsets.gcc_ball_dic = offset;
-            } else if (strcmp(fname, "BallUpdateList") == 0) {
-                m_offsets.gcc_ball_update_list = offset;
-            } else if (strcmp(fname, "PersonList") == 0) {
-                m_offsets.gcc_person_list = offset;
-            } else if (strcmp(fname, "PersonDic") == 0) {
-                m_offsets.gcc_person_dic = offset;
             } else if (strcmp(fname, "SelfPlayerID") == 0) {
                 m_offsets.gcc_self_player_id = offset;
-            } else if (strcmp(fname, "curPlayerID") == 0) {
-                m_offsets.gcc_cur_player_id = offset;
-            } else if (strcmp(fname, "Is3DRoomType") == 0 ||
-                       strcmp(fname, "<Is3DRoomType>k__BackingField") == 0) {
-                m_offsets.gcc_is_3d_room = offset;
-            } else if (strcmp(fname, "Map3D") == 0) {
-                m_offsets.gcc_map3d = offset;
+            }
+            // 兼容旧模板字段名 (其他版本游戏可能用 List)
+            else if (strcmp(fname, "players") == 0 || strcmp(fname, "playerList") == 0 ||
+                strcmp(fname, "player_list") == 0 || strcmp(fname, "allPlayers") == 0) {
+                m_offsets.gcc_player_list = offset;
+            } else if (strcmp(fname, "fishList") == 0 || strcmp(fname, "fish_list") == 0 ||
+                       strcmp(fname, "fishes") == 0) {
+                m_offsets.gcc_fish_list = offset;
+            } else if (strcmp(fname, "cells") == 0 || strcmp(fname, "cellList") == 0 ||
+                       strcmp(fname, "cell_list") == 0) {
+                m_offsets.gcc_cell_list = offset;
+            } else if (strcmp(fname, "selfPlayer") == 0 || strcmp(fname, "self_player") == 0 ||
+                       strcmp(fname, "localPlayer") == 0 || strcmp(fname, "myPlayer") == 0) {
+                m_offsets.gcc_self_player = offset;
             }
         }
     }
 
-    // --- 遍历 PlayerBase 字段 (打印全部, 按日志确认的字段名匹配) ---
+    // --- 遍历 PlayerBase 字段 (打印全部) ---
     if (m_classPlayerBase) {
         ESP_LOGI("ESP: === PlayerBase 全部字段 ===");
         APP_LOGI("ESP", "--- PlayerBase 字段 ---");
@@ -495,48 +644,154 @@ bool ESPSystem::InitFieldOffsets() {
             m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
                 char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
 
-            // 按日志确认的字段名匹配 (PlayerBase)
-            if (strcmp(fname, "Name") == 0) {
+            // 匹配真实字段名 (从日志确认: Name/ID/Color/isAlive/_pos/radius)
+            // _pos 是 Vector3 (12 字节: x,y,z), 拆成三个 float 偏移
+            if (strcmp(fname, "Name") == 0 || strcmp(fname, "name") == 0 ||
+                strcmp(fname, "playerName") == 0 || strcmp(fname, "nickName") == 0 ||
+                strcmp(fname, "userName") == 0) {
                 m_offsets.pb_name = offset;
-            } else if (strcmp(fname, "ID") == 0) {
-                m_offsets.pb_id = offset;
             } else if (strcmp(fname, "_pos") == 0) {
-                m_offsets.pb_pos = offset;
+                // _pos 是 Vector3, x@offset, y@offset+4, z@offset+8
+                m_offsets.pb_x = offset;
+                m_offsets.pb_y = offset + 4;
+                m_offsets.pb_z = offset + 8;
             } else if (strcmp(fname, "pos") == 0) {
-                m_offsets.pb_pos2 = offset;
-            } else if (strcmp(fname, "radius") == 0) {
+                // 备用 pos 字段 (如果 _pos 没匹配到, 用 pos)
+                if (m_offsets.pb_x == 0) {
+                    m_offsets.pb_x = offset;
+                    m_offsets.pb_y = offset + 4;
+                    m_offsets.pb_z = offset + 8;
+                }
+            } else if (strcmp(fname, "radius") == 0 || strcmp(fname, "Radius") == 0 ||
+                       strcmp(fname, "size") == 0 || strcmp(fname, "Size") == 0 ||
+                       strcmp(fname, "mass") == 0) {
                 m_offsets.pb_radius = offset;
-            } else if (strcmp(fname, "isAlive") == 0) {
-                m_offsets.pb_is_alive = offset;
-            } else if (strcmp(fname, "AllBallScore") == 0) {
+            } else if (strcmp(fname, "ID") == 0 || strcmp(fname, "id") == 0 ||
+                       strcmp(fname, "playerId") == 0 || strcmp(fname, "objectId") == 0) {
+                m_offsets.pb_id = offset;
+            } else if (strcmp(fname, "rankId") == 0 || strcmp(fname, "rank_id") == 0 ||
+                       strcmp(fname, "rank") == 0) {
+                m_offsets.pb_rank_id = offset;
+            } else if (strcmp(fname, "score") == 0 || strcmp(fname, "weight") == 0 ||
+                       strcmp(fname, "exp") == 0) {
                 m_offsets.pb_score = offset;
-            } else if (strcmp(fname, "Color") == 0) {
+            } else if (strcmp(fname, "isAlive") == 0 || strcmp(fname, "is_alive") == 0 ||
+                       strcmp(fname, "alive") == 0) {
+                m_offsets.pb_is_alive = offset;
+            } else if (strcmp(fname, "Color") == 0 || strcmp(fname, "color") == 0 ||
+                       strcmp(fname, "playerColor") == 0) {
                 m_offsets.pb_color = offset;
-            } else if (strcmp(fname, "TeamID") == 0) {
-                m_offsets.pb_team_id = offset;
+            }
+            // Transform 引用字段 (Unity 位置在 Transform 上, 必须通过它读坐标!)
+            // PlayerBase 日志确认有 SelfTF @ 0xb8, 但之前没解析
+            else if (strcmp(fname, "SelfTF") == 0 || strcmp(fname, "selfTF") == 0 ||
+                     strcmp(fname, "tf") == 0 || strcmp(fname, "TF") == 0 ||
+                     strcmp(fname, "transform") == 0 || strcmp(fname, "Transform") == 0 ||
+                     strcmp(fname, "selfTf") == 0 || strcmp(fname, "_transform") == 0 ||
+                     strcmp(fname, "m_Transform") == 0 || strcmp(fname, "SelfTf") == 0 ||
+                     strcmp(fname, "ballTf") == 0 || strcmp(fname, "BallTF") == 0) {
+                m_offsets.pb_transform = offset;
             }
         }
     }
 
+    // --- 遍历 Ball 类字段 (BallDic 里的对象是 Ball, 字段布局和 PlayerBase 不同) ---
+    // 日志证据: BallDic 首个对象 name=空 x=0 y=0 r=1.0, 说明 Ball 的坐标字段偏移和 PlayerBase 不同
+    // 必须单独解析 Ball 类的字段偏移
+    if (m_classBall) {
+        ESP_LOGI("ESP: === Ball 全部字段 ===");
+        APP_LOGI("ESP", "--- Ball 字段 ---");
+        void* iter = nullptr;
+        FieldInfo* field;
+        while ((field = m_fn_class_get_fields(m_classBall, &iter)) != nullptr) {
+            const char* fname = m_fn_field_get_name(field);
+            size_t offset = m_fn_field_get_offset(field);
+            if (!fname) continue;
+
+            ESP_LOGI("ESP:   Ball.%s @ 0x%zx", fname, offset);
+            APP_LOGI("ESP", "  Ball.%s @ 0x%zx", fname, offset);
+
+            // 用和 PlayerBase 一样的字段名匹配规则, 但存到 m_ballOffsets
+            if (strcmp(fname, "Name") == 0 || strcmp(fname, "name") == 0 ||
+                strcmp(fname, "playerName") == 0 || strcmp(fname, "nickName") == 0) {
+                m_ballOffsets.pb_name = offset;
+            } else if (strcmp(fname, "_pos") == 0 || strcmp(fname, "pos") == 0 ||
+                       strcmp(fname, "position") == 0 || strcmp(fname, "Position") == 0 ||
+                       strcmp(fname, "curPos") == 0 || strcmp(fname, "worldPos") == 0) {
+                // Vector3: x@offset, y@offset+4, z@offset+8
+                m_ballOffsets.pb_x = offset;
+                m_ballOffsets.pb_y = offset + 4;
+                m_ballOffsets.pb_z = offset + 8;
+            } else if (strcmp(fname, "x") == 0 || strcmp(fname, "posX") == 0 ||
+                       strcmp(fname, "X") == 0) {
+                if (m_ballOffsets.pb_x == 0) m_ballOffsets.pb_x = offset;
+            } else if (strcmp(fname, "y") == 0 || strcmp(fname, "posY") == 0 ||
+                       strcmp(fname, "Y") == 0) {
+                if (m_ballOffsets.pb_y == 0) m_ballOffsets.pb_y = offset;
+            } else if (strcmp(fname, "radius") == 0 || strcmp(fname, "Radius") == 0 ||
+                       strcmp(fname, "size") == 0 || strcmp(fname, "Size") == 0 ||
+                       strcmp(fname, "mass") == 0) {
+                m_ballOffsets.pb_radius = offset;
+            } else if (strcmp(fname, "ID") == 0 || strcmp(fname, "id") == 0 ||
+                       strcmp(fname, "ballId") == 0 || strcmp(fname, "Ballid") == 0 ||
+                       strcmp(fname, "BallID") == 0) {
+                m_ballOffsets.pb_id = offset;
+            } else if (strcmp(fname, "rankId") == 0 || strcmp(fname, "rank_id") == 0 ||
+                       strcmp(fname, "PlayerID") == 0 || strcmp(fname, "playerId") == 0 ||
+                       strcmp(fname, "ownerId") == 0) {
+                m_ballOffsets.pb_rank_id = offset;
+            } else if (strcmp(fname, "score") == 0 || strcmp(fname, "weight") == 0) {
+                m_ballOffsets.pb_score = offset;
+            } else if (strcmp(fname, "isAlive") == 0 || strcmp(fname, "is_alive") == 0 ||
+                       strcmp(fname, "alive") == 0) {
+                m_ballOffsets.pb_is_alive = offset;
+            } else if (strcmp(fname, "Color") == 0 || strcmp(fname, "color") == 0) {
+                m_ballOffsets.pb_color = offset;
+            }
+            // Transform 引用字段 (Ball 的位置在 Transform 上!)
+            else if (strcmp(fname, "SelfTF") == 0 || strcmp(fname, "selfTF") == 0 ||
+                     strcmp(fname, "tf") == 0 || strcmp(fname, "TF") == 0 ||
+                     strcmp(fname, "transform") == 0 || strcmp(fname, "Transform") == 0 ||
+                     strcmp(fname, "selfTf") == 0 || strcmp(fname, "_transform") == 0 ||
+                     strcmp(fname, "m_Transform") == 0 || strcmp(fname, "SelfTf") == 0 ||
+                     strcmp(fname, "ballTf") == 0 || strcmp(fname, "BallTF") == 0) {
+                m_ballOffsets.pb_transform = offset;
+            }
+        }
+        m_ballOffsets.initialized = true;
+        APP_LOGI("ESP", "Ball 偏移: name=0x%zu ID=0x%zu x=0x%zu y=0x%zu radius=0x%zu transform=0x%zu",
+            m_ballOffsets.pb_name, m_ballOffsets.pb_id, m_ballOffsets.pb_x, m_ballOffsets.pb_y,
+            m_ballOffsets.pb_radius, m_ballOffsets.pb_transform);
+    } else {
+        // 没有 Ball 类, 复用 PlayerBase 偏移 (兜底)
+        m_ballOffsets = m_offsets;
+        APP_LOGW("ESP", "未找到 Ball 类, BallDic 对象复用 PlayerBase 偏移");
+    }
+
     m_offsets.initialized = true;
     ESP_LOGI("ESP: 字段偏移初始化完成");
-    ESP_LOGI("ESP:   GCC: player_dic=0x%zu ball_dic=0x%zu self_pid=0x%zu cur_pid=0x%zu",
-         m_offsets.gcc_player_dic, m_offsets.gcc_ball_dic,
-         m_offsets.gcc_self_player_id, m_offsets.gcc_cur_player_id);
-    ESP_LOGI("ESP:   PB: name=0x%zu id=0x%zu pos=0x%zu radius=0x%zu score=0x%zu isAlive=0x%zu",
-         m_offsets.pb_name, m_offsets.pb_id, m_offsets.pb_pos,
-         m_offsets.pb_radius, m_offsets.pb_score, m_offsets.pb_is_alive);
-    APP_LOGI("ESP", "字段偏移: GCC.player_dic=0x%zu ball_dic=0x%zu self_pid=0x%zu",
-        m_offsets.gcc_player_dic, m_offsets.gcc_ball_dic, m_offsets.gcc_self_player_id);
-    APP_LOGI("ESP", "字段偏移: PB.name=0x%zu id=0x%zu pos=0x%zu radius=0x%zu score=0x%zu",
-        m_offsets.pb_name, m_offsets.pb_id, m_offsets.pb_pos,
-        m_offsets.pb_radius, m_offsets.pb_score);
+    APP_LOGI("ESP", "=== 字段偏移汇总 ===");
+    APP_LOGI("ESP", "GCC: PlayerDic=0x%zu BallDic=0x%zu SelfPlayerID=0x%zu",
+         m_offsets.gcc_player_dic, m_offsets.gcc_ball_dic, m_offsets.gcc_self_player_id);
+    APP_LOGI("ESP", "GCC(兼容): player_list=0x%zu fish_list=0x%zu cell_list=0x%zu",
+         m_offsets.gcc_player_list, m_offsets.gcc_fish_list, m_offsets.gcc_cell_list);
+    APP_LOGI("ESP", "PB: name=0x%zu ID=0x%zu x=0x%zu y=0x%zu z=0x%zu radius=0x%zu color=0x%zu isAlive=0x%zu",
+         m_offsets.pb_name, m_offsets.pb_id, m_offsets.pb_x, m_offsets.pb_y, m_offsets.pb_z,
+         m_offsets.pb_radius, m_offsets.pb_color, m_offsets.pb_is_alive);
+    ESP_LOGI("ESP:   GCC: PlayerDic=0x%zu BallDic=0x%zu SelfPlayerID=0x%zu",
+         m_offsets.gcc_player_dic, m_offsets.gcc_ball_dic, m_offsets.gcc_self_player_id);
+    ESP_LOGI("ESP:   PB: name=0x%zu ID=0x%zu x=0x%zu y=0x%zu radius=0x%zu color=0x%zu isAlive=0x%zu",
+         m_offsets.pb_name, m_offsets.pb_id, m_offsets.pb_x, m_offsets.pb_y,
+         m_offsets.pb_radius, m_offsets.pb_color, m_offsets.pb_is_alive);
 
     // 诊断: 如果关键字典字段没找到, 提示
-    if (m_offsets.gcc_player_dic == 0 && m_offsets.gcc_ball_dic == 0) {
-        m_diagStatus = "警告: 未匹配到 PlayerDic/BallDic 字段, 请查看 logcat 中 ESP 的字段列表";
+    if (m_offsets.gcc_player_dic == 0 && m_offsets.gcc_ball_dic == 0 &&
+        m_offsets.gcc_player_list == 0 && m_offsets.gcc_fish_list == 0) {
+        m_diagStatus = "警告: 未匹配到 PlayerDic/BallDic 任何对象字典字段, 请查看日志字段列表";
         ESP_LOGW("ESP: %s", m_diagStatus.c_str());
-        APP_LOGW("ESP", "未匹配到 PlayerDic/BallDic — 位置数据主要从 BallDic 获取");
+        APP_LOGE("ESP", "✗ 未匹配到任何对象字典/列表字段 — ReadGameObjects 将无法读取对象!");
+    } else {
+        APP_LOGI("ESP", "✓ 已匹配到对象字典字段, 可读取对象");
     }
 
     return true;
@@ -641,43 +896,61 @@ void ESPSystem::ReadCameraInfo() {
     Il2CppObject* camObj = m_fn_runtime_invoke(m_methodGetCurrent, nullptr, nullptr, &exc);
     if (!camObj || exc) return;
 
-    // 优先: 用 runtime_invoke 调用 get_orthographicSize() 方法 (返回装箱的 float)
-    if (m_methodGetOrthographicSize) {
-        Il2CppException* exc2 = nullptr;
-        Il2CppObject* result = m_fn_runtime_invoke(m_methodGetOrthographicSize, camObj, nullptr, &exc2);
-        if (result && !exc2) {
-            // 返回值是装箱的 float, 跳过对象头(16字节)读取
-            float val = *(float*)((char*)result + 16);
-            if (val > 0 && val < 100000) {
-                m_camera.zoom = val;
-                m_camera.valid = true;
-                if (m_counter.load() % 240 == 0) {
-                    APP_LOGI("ESP", "Camera.zoom (via get_orthographicSize) = %.2f", val);
+    Il2CppClass* camClass = m_fn_object_get_class(camObj);
+    if (!camClass) return;
+
+    // Unity Camera 的 orthographicSize / transform.position 都是属性,
+    // class_get_fields 拿不到 (它们是 get_ 方法), 必须用 runtime_invoke 调用 getter
+    //
+    // 关键方法:
+    //   Camera.get_orthographicSize() → float  (正交相机半高, 2D 游戏用)
+    //   Camera.get_transform()        → Transform
+    //   Transform.get_position()      → Vector3 (相机世界坐标)
+
+    // 读 orthographicSize
+    if (m_camera.zoom <= 0) {
+        MethodInfo* mGetOrtho = m_fn_class_get_method_from_name(camClass, "get_orthographicSize", 0);
+        if (mGetOrtho) {
+            Il2CppException* e2 = nullptr;
+            Il2CppObject* ret = m_fn_runtime_invoke(mGetOrtho, camObj, nullptr, &e2);
+            if (ret && !e2) {
+                // 返回值是 float, 装箱为 object (Il2CppObject 头 16 字节 + float 4 字节)
+                float val = *(float*)((char*)ret + 16);
+                if (val > 0) {
+                    m_camera.zoom = val;
+                    static bool s_loggedOrtho = false;
+                    if (!s_loggedOrtho) {
+                        APP_LOGI("ESP", "✓ Camera.orthographicSize = %.2f", val);
+                        s_loggedOrtho = true;
+                    }
                 }
             }
-        } else if (m_counter.load() % 240 == 0) {
-            APP_LOGW("ESP", "get_orthographicSize 调用失败/返回 null, 将回退字段读取");
         }
     }
 
-    // 备用: 字段读取 (backing field) — 当 runtime_invoke 不可用或失败时
-    if (m_camera.zoom <= 0) {
-        Il2CppClass* camClass = m_fn_object_get_class(camObj);
-        if (camClass) {
-            void* iter = nullptr;
-            FieldInfo* field;
-            while ((field = m_fn_class_get_fields(camClass, &iter)) != nullptr) {
-                const char* fname = m_fn_field_get_name(field);
-                size_t offset = m_fn_field_get_offset(field);
-                if (!fname || offset == 0) continue;
-                if (strcmp(fname, "orthographicSize") == 0 ||
-                    strcmp(fname, "<orthographicSize>k__BackingField") == 0 ||
-                    strcmp(fname, "m_OrthographicSize") == 0 ||
-                    strcmp(fname, "zoom") == 0 || strcmp(fname, "halfHeight") == 0) {
-                    float val = *(float*)((char*)camObj + offset);
-                    if (val > 0 && val < 100000) {
-                        m_camera.zoom = val;
-                        m_camera.valid = true;
+    // 读 transform.position (相机世界坐标)
+    MethodInfo* mGetTransform = m_fn_class_get_method_from_name(camClass, "get_transform", 0);
+    if (mGetTransform) {
+        Il2CppException* e3 = nullptr;
+        Il2CppObject* transObj = m_fn_runtime_invoke(mGetTransform, camObj, nullptr, &e3);
+        if (transObj && !e3) {
+            Il2CppClass* transClass = m_fn_object_get_class(transObj);
+            if (transClass) {
+                MethodInfo* mGetPos = m_fn_class_get_method_from_name(transClass, "get_position", 0);
+                if (mGetPos) {
+                    Il2CppException* e4 = nullptr;
+                    Il2CppObject* posObj = m_fn_runtime_invoke(mGetPos, transObj, nullptr, &e4);
+                    if (posObj && !e4) {
+                        // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
+                        float px = *(float*)((char*)posObj + 16);
+                        float py = *(float*)((char*)posObj + 20);
+                        m_camera.cam_x = px;
+                        m_camera.cam_y = py;
+                        static bool s_loggedPos = false;
+                        if (!s_loggedPos) {
+                            APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
+                            s_loggedPos = true;
+                        }
                     }
                 }
             }
@@ -689,27 +962,108 @@ void ESPSystem::ReadCameraInfo() {
     m_camera.screen_w = io.DisplaySize.x;
     m_camera.screen_h = io.DisplaySize.y;
 
-    // 如果没有读到 zoom, 标记无效 (Render 会动态兜底计算)
+    // 如果没读到 zoom, 用经验默认值 (大鱼吃小鱼 orthographicSize 约 20-30)
     if (m_camera.zoom <= 0) {
-        m_camera.valid = false;
+        m_camera.zoom = 30.0f;
     }
 
-    if (m_counter.load() % 120 == 0) {
-        APP_LOGI("ESP", "Camera: zoom=%.1f valid=%d screen=%.0fx%.0f",
-            m_camera.zoom, (int)m_camera.valid, m_camera.screen_w, m_camera.screen_h);
-    }
+    m_camera.valid = true;
 }
 
 // =============================================================================
-// 读取游戏对象 — 优先从 BallDic 读取 (球体有半径+Transform位置)
+// 通过 Transform.get_position 读取对象世界坐标
+// 关键修复: Unity 游戏对象的位置在 Transform 组件上, 不是直接字段!
+// 之前直接读 _pos 字段读到 0, 因为 _pos 可能不是实际生效的位置字段
+//
+// 调用链: obj.transform → Transform 对象 → Transform.get_position() → Vector3
+// Vector3 是值类型, runtime_invoke 返回装箱对象: [Il2CppObject 头 16字节][x 4][y 4][z 4]
+// =============================================================================
+bool ESPSystem::ReadObjectPositionViaTransform(Il2CppObject* obj, size_t transformOffset,
+                                                float& outX, float& outY, float& outZ) {
+    outX = outY = outZ = 0;
+    if (!obj || transformOffset == 0 || !m_fn_class_get_method_from_name ||
+        !m_fn_runtime_invoke || !m_fn_object_get_class) {
+        return false;
+    }
+
+    // 1. 读 Transform 引用字段
+    Il2CppObject* tfObj = *(Il2CppObject**)((char*)obj + transformOffset);
+    if (!tfObj) return false;
+
+    // 2. 拿 Transform 类, 找 get_position 方法 (0 参数, 返回 Vector3)
+    Il2CppClass* tfClass = m_fn_object_get_class(tfObj);
+    if (!tfClass) return false;
+    MethodInfo* mGetPos = m_fn_class_get_method_from_name(tfClass, "get_position", 0);
+    if (!mGetPos) return false;
+
+    // 3. 调用 get_position
+    Il2CppException* exc = nullptr;
+    Il2CppObject* posObj = m_fn_runtime_invoke(mGetPos, tfObj, nullptr, &exc);
+    if (!posObj || exc) return false;
+
+    // 4. 装箱 Vector3: [Il2CppObject 头 16字节][x f32][y f32][z f32]
+    outX = *(float*)((char*)posObj + 16);
+    outY = *(float*)((char*)posObj + 20);
+    outZ = *(float*)((char*)posObj + 24);
+    return true;
+}
+
+// =============================================================================
+// 读取游戏对象 — 遍历 GameCoreCenter 的对象字典 (PlayerDic / BallDic)
 // 对应 data_reader.rs 的 read_objects()
 //
-// IL2CPP 调用链:
-//   GameCoreCenter 实例 → 读取 SelfPlayerID / BallDic / PlayerDic 字段
-//   BallDic 是 Dictionary<int, DrawCircle>, 遍历 _entries 数组取每个 Entry.value
-//   对每个 DrawCircle: 读 Radius/SelfTF(→Transform.get_position)/ID/curScore
-//   若 BallDic 不可用, 回退到 PlayerDic (Dictionary<int, PlayerBase>)
+// 关键: 游戏用 Dictionary<int, T> 而非 List<T>!
+//   GCC.PlayerDic @ 0x58 — Dictionary<int, PlayerBase>
+//   GCC.BallDic   @ 0x68 — Dictionary<int, Ball>
+//   GCC.SelfPlayerID @ 0x160 — int (自身玩家 ID)
+//
+// IL2CPP Dictionary 内存布局 (64位):
+//   +0x10: _buckets   (int[])
+//   +0x18: _entries   (Entry[])  ← 遍历这个
+//   +0x20: _count     (int, 含 free entry)
+//   +0x28: _freeCount (int)
+// Entry<int, TRef> 布局 (24 字节):
+//   +0x00: hashCode (int, free entry 为 -1)
+//   +0x04: next     (int)
+//   +0x08: key      (int)
+//   +0x10: value    (引用, 8 字节)
 // =============================================================================
+
+// 读取 Dictionary 的所有有效 value
+// outValues 返回所有 hashCode >= 0 且 value 非空的对象指针
+void ESPSystem::ReadDictionaryValues(void* dictObj, std::vector<Il2CppObject*>& outValues) {
+    outValues.clear();
+    if (!dictObj) return;
+
+    // Dictionary._entries @ 0x18 (Entry[] 引用)
+    Il2CppArray* entries = *(Il2CppArray**)((char*)dictObj + 0x18);
+    // Dictionary._count @ 0x20 (int, 已分配 entry 数, 含 free)
+    int count = *(int*)((char*)dictObj + 0x20);
+
+    if (!entries || count <= 0) return;
+
+    // 安全上限: 避免读到垃圾值导致巨量循环 (一个游戏对局玩家/球数不会超过 10000)
+    if (count > 10000) count = 10000;
+
+    // IL2CPP 数组数据起始 = 4 * sizeof(void*) = 32 字节 (64位)
+    // { vtable(8), monitor(8), bounds*(8), max_length(8), data[] }
+    char* dataStart = (char*)entries + 4 * sizeof(void*);
+
+    // Entry<int, TRef> 大小 = 24 字节 (4+4+4[+4pad]+8)
+    // value 偏移 = 0x10
+    const size_t ENTRY_SIZE = 24;
+    const size_t HASH_OFFSET = 0x0;
+    const size_t VALUE_OFFSET = 0x10;
+
+    for (int i = 0; i < count; i++) {
+        char* entry = dataStart + i * ENTRY_SIZE;
+        int hashCode = *(int*)(entry + HASH_OFFSET);
+        if (hashCode < 0) continue;  // free entry (hashCode = -1)
+
+        Il2CppObject* value = *(Il2CppObject**)(entry + VALUE_OFFSET);
+        if (value) outValues.push_back(value);
+    }
+}
 
 void ESPSystem::ReadGameObjects() {
     if (!m_offsets.initialized || !m_gameInstance) return;
@@ -717,98 +1071,186 @@ void ESPSystem::ReadGameObjects() {
     std::vector<GameObjectInfo> newObjects;
     uint32_t c = m_counter.load();
 
-    // --- 读取 SelfPlayerID (识别自身) ---
+    // --- 读取自身玩家 ID (GCC.SelfPlayerID @ 0x160) ---
+    // 用于识别哪个 PlayerBase 是自己
     int selfPlayerId = -1;
     if (m_offsets.gcc_self_player_id) {
         selfPlayerId = *(int*)((char*)m_gameInstance + m_offsets.gcc_self_player_id);
     }
-    if (selfPlayerId <= 0 && m_offsets.gcc_cur_player_id) {
-        int cur = *(int*)((char*)m_gameInstance + m_offsets.gcc_cur_player_id);
-        if (cur > 0) selfPlayerId = cur;
-    }
-    if (c % 120 == 0) {
-        APP_LOGI("ESP", "ReadGameObjects: selfPlayerId=%d", selfPlayerId);
-    }
+    // 用户在 UI 配置的 self_rank_id 优先 (如果有), 否则用游戏字段读取的
+    int effectiveSelfId = (config.self_rank_id >= 0) ? config.self_rank_id : selfPlayerId;
 
-    // --- 优先: BallDic (球体有半径和 Transform 世界坐标) ---
-    bool ballRead = false;
-    void* ballDic = nullptr;
-    if (m_offsets.gcc_ball_dic) {
-        ballDic = *(void**)((char*)m_gameInstance + m_offsets.gcc_ball_dic);
-    }
-    if (ballDic) {
-        // 首次: 查找 Ball(DrawCircle)/Transform 类与方法
-        if (!m_classBall || !m_methodGetPosition) {
-            FindBallAndTransformClasses();
+    // --- 读取单个对象的字段 (接受偏移参数, PlayerBase 和 Ball 用各自偏移) ---
+    auto readObjectFields = [&](Il2CppObject* obj, const FieldOffsets& off) -> GameObjectInfo {
+        GameObjectInfo info;
+
+        // 读取名称 (通过 get_name 方法或 name 字段)
+        info.name = ReadObjectName(obj);
+
+        // 读取坐标: 优先用 Transform.get_position (Unity 位置在 Transform 上!)
+        // 之前直接读 _pos 字段读到 0, 因为 _pos 不是实际生效的位置字段
+        bool gotPos = false;
+        if (off.pb_transform) {
+            gotPos = ReadObjectPositionViaTransform(obj, off.pb_transform,
+                                                     info.world_x, info.world_y, info.world_z);
         }
-        if (m_classBall) {
-            size_t before = newObjects.size();
-            TryReadFromBallDic(ballDic, selfPlayerId, newObjects, c);
-            if (newObjects.size() > before) {
-                ballRead = true;
-            } else if (c % 120 == 0) {
-                APP_LOGW("ESP", "BallDic 存在但未读取到任何球体 (可能 entries 为空或偏移有误)");
+        // 兜底: 如果没有 transform 字段或读取失败, 用 _pos 字段
+        if (!gotPos) {
+            if (off.pb_x) info.world_x = *(float*)((char*)obj + off.pb_x);
+            if (off.pb_y) info.world_y = *(float*)((char*)obj + off.pb_y);
+            if (off.pb_z) info.world_z = *(float*)((char*)obj + off.pb_z);
+        }
+
+        // 读取半径
+        if (off.pb_radius) info.radius = *(float*)((char*)obj + off.pb_radius);
+
+        // 读取 ID
+        if (off.pb_id) info.object_id = *(int*)((char*)obj + off.pb_id);
+
+        // 读取排名 ID (如果有 rankId 字段)
+        if (off.pb_rank_id) info.rank_id = *(int*)((char*)obj + off.pb_rank_id);
+        else info.rank_id = info.object_id;  // 没有独立的 rankId, 用 ID 代替
+
+        // 读取分数
+        if (off.pb_score) info.score = *(int*)((char*)obj + off.pb_score);
+
+        // 读取存活状态
+        if (off.pb_is_alive) info.is_alive = *(bool*)((char*)obj + off.pb_is_alive);
+        else info.is_alive = true;
+
+        // 识别是否是自己 (用 ID 比对 SelfPlayerID)
+        info.is_self = (effectiveSelfId >= 0 && info.object_id == effectiveSelfId);
+
+        // 设置颜色
+        info.color = GetObjectColor(info);
+
+        return info;
+    };
+
+    // --- 读取对象 (Dictionary 优先, 兼容 Array) ---
+    // useBallOffsets=true 时用 m_ballOffsets (Ball 类偏移), 否则用 m_offsets (PlayerBase)
+    auto readFromDicOrArray = [&](size_t dicOffset, size_t listOffset,
+                                   const char* name, const FieldOffsets& off) {
+        if (dicOffset) {
+            // 方式 1: 读取 Dictionary (PlayerDic / BallDic)
+            void* dictObj = *(void**)((char*)m_gameInstance + dicOffset);
+            if (!dictObj) {
+                if (c % 120 == 0) APP_LOGD("ESP", "%s 字典为 null (offset=0x%zx)", name, dicOffset);
+                return (size_t)0;
             }
-        } else if (c % 120 == 0) {
-            APP_LOGW("ESP", "BallDic 存在但 DrawCircle 类未找到, 跳过 BallDic");
+            std::vector<Il2CppObject*> values;
+            ReadDictionaryValues(dictObj, values);
+            size_t n = values.size();
+            if (c % 120 == 0) {
+                APP_LOGI("ESP", "%s 字典读取: %zu 个对象 (offset=0x%zx)", name, n, dicOffset);
+            }
+            for (size_t i = 0; i < n; i++) {
+                GameObjectInfo info = readObjectFields(values[i], off);
+                // 每 120 帧打印首个对象详情 (诊断用)
+                if (c % 120 == 0 && i == 0) {
+                    APP_LOGI("ESP", "%s 首个对象 [name=%s x=%.1f y=%.1f r=%.1f id=%d alive=%d self=%d]",
+                        name, info.name.c_str(), info.world_x, info.world_y, info.radius,
+                        info.object_id, (int)info.is_alive, (int)info.is_self);
+                }
+                newObjects.push_back(std::move(info));
+            }
+            return n;
+        } else if (listOffset) {
+            // 方式 2 (兼容): 读取 Array (旧模板字段 players/fishList/cells)
+            Il2CppArray* array = *(Il2CppArray**)((char*)m_gameInstance + listOffset);
+            if (!array) {
+                if (c % 120 == 0) APP_LOGD("ESP", "%s 数组为 null (offset=0x%zx)", name, listOffset);
+                return (size_t)0;
+            }
+            size_t len = m_fn_array_length(array);
+            if (c % 120 == 0) APP_LOGI("ESP", "%s 数组长度=%zu (offset=0x%zx)", name, len, listOffset);
+            for (size_t i = 0; i < len; i++) {
+                Il2CppObject* obj = nullptr;
+                if (m_fn_array_get) {
+                    obj = m_fn_array_get(array, i);
+                } else {
+                    char* dataStart = (char*)array + 4 * sizeof(void*);
+                    obj = *(Il2CppObject**)(dataStart + i * sizeof(void*));
+                }
+                if (!obj) continue;
+                GameObjectInfo info = readObjectFields(obj, off);
+                newObjects.push_back(std::move(info));
+            }
+            return len;
         }
-    } else if (c % 120 == 0) {
-        APP_LOGD("ESP", "BallDic 为 null (offset=0x%zu), 尝试 PlayerDic", m_offsets.gcc_ball_dic);
-    }
+        return (size_t)0;
+    };
 
-    // --- 备用: PlayerDic (BallDic 不可用或无数据时) ---
-    if (!ballRead && m_offsets.gcc_player_dic) {
-        void* playerDic = *(void**)((char*)m_gameInstance + m_offsets.gcc_player_dic);
-        if (playerDic) {
-            DiscoverDicOffsets(playerDic, m_offsets, m_fn_object_get_class,
-                m_fn_class_get_fields, m_fn_field_get_name, m_fn_field_get_offset);
-            size_t eOff = m_offsets.dic_entries ? m_offsets.dic_entries : 0x18;
-            size_t cOff = m_offsets.dic_count ? m_offsets.dic_count : 0x20;
-            Il2CppArray* entries = *(Il2CppArray**)((char*)playerDic + eOff);
-            int count = *(int*)((char*)playerDic + cOff);
-            if (entries && count > 0) {
-                size_t arrLen = m_fn_array_length(entries);
-                size_t valueOff = (12 + sizeof(void*) - 1) & ~(sizeof(void*) - 1);
-                size_t entrySize = valueOff + sizeof(void*);
-                size_t scanLimit = arrLen < 500 ? arrLen : 500;
-                int effectiveSelfId = (selfPlayerId > 0) ? selfPlayerId : config.self_rank_id;
-                for (size_t i = 0; i < scanLimit; i++) {
-                    char* entry = (char*)entries + kIl2CppArrayDataOffset + i * entrySize;
-                    Il2CppObject* pbObj = *(Il2CppObject**)(entry + valueOff);
-                    if (!pbObj) continue;
+    // 读取玩家字典 (PlayerDic) — 用 PlayerBase 偏移
+    size_t playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
+                                              m_offsets.gcc_player_list, "PlayerDic", m_offsets);
 
-                    GameObjectInfo info;
-                    info.name = ReadObjectName(pbObj);
-                    if (m_offsets.pb_id) info.object_id = *(int*)((char*)pbObj + m_offsets.pb_id);
-                    // 位置: _pos 是 Vector3 (日志确认值常为0, 位置主要从 BallDic 获取, 此处保留读取)
-                    if (m_offsets.pb_pos) {
-                        float* p = (float*)((char*)pbObj + m_offsets.pb_pos);
-                        info.world_x = p[0];
-                        info.world_y = p[1];
-                        info.world_z = p[2];
+    // --- BallDic 动态类识别 ---
+    // BallDic 里的对象类名可能不叫 "Ball" (FindGameClasses 找不到),
+    // 用 object_get_class 从首对象拿真实类, 再解析其字段偏移
+    if (m_offsets.gcc_ball_dic && !m_classBall && m_fn_object_get_class && m_fn_class_get_name) {
+        void* dictObj = *(void**)((char*)m_gameInstance + m_offsets.gcc_ball_dic);
+        if (dictObj) {
+            std::vector<Il2CppObject*> tmp;
+            ReadDictionaryValues(dictObj, tmp);
+            if (!tmp.empty() && tmp[0]) {
+                Il2CppClass* bc = m_fn_object_get_class(tmp[0]);
+                if (bc) {
+                    const char* cn = m_fn_class_get_name(bc);
+                    APP_LOGW("ESP", "BallDic 对象真实类=%s (不叫 Ball), 现场解析字段偏移",
+                        cn ? cn : "?");
+                    m_classBall = bc;
+                    // 重新解析 Ball 字段偏移 (用真实类)
+                    // 复用 InitFieldOffsets 里的 Ball 字段遍历逻辑
+                    if (m_fn_class_get_fields && m_fn_field_get_name && m_fn_field_get_offset) {
+                        APP_LOGI("ESP", "--- Ball(%s) 字段 ---", cn ? cn : "?");
+                        void* iter = nullptr;
+                        FieldInfo* field;
+                        while ((field = m_fn_class_get_fields(bc, &iter)) != nullptr) {
+                            const char* fname = m_fn_field_get_name(field);
+                            size_t offset = m_fn_field_get_offset(field);
+                            if (!fname) continue;
+                            APP_LOGI("ESP", "  Ball.%s @ 0x%zx", fname, offset);
+                            if (strcmp(fname, "Radius") == 0 || strcmp(fname, "radius") == 0 ||
+                                strcmp(fname, "Size") == 0 || strcmp(fname, "size") == 0 ||
+                                strcmp(fname, "mass") == 0) {
+                                m_ballOffsets.pb_radius = offset;
+                            } else if (strcmp(fname, "SelfTF") == 0 || strcmp(fname, "selfTF") == 0 ||
+                                       strcmp(fname, "tf") == 0 || strcmp(fname, "TF") == 0 ||
+                                       strcmp(fname, "transform") == 0 || strcmp(fname, "Transform") == 0 ||
+                                       strcmp(fname, "selfTf") == 0 || strcmp(fname, "_transform") == 0 ||
+                                       strcmp(fname, "m_Transform") == 0 || strcmp(fname, "SelfTf") == 0 ||
+                                       strcmp(fname, "ballTf") == 0 || strcmp(fname, "BallTF") == 0) {
+                                m_ballOffsets.pb_transform = offset;
+                            } else if (strcmp(fname, "ID") == 0 || strcmp(fname, "id") == 0 ||
+                                       strcmp(fname, "ballId") == 0 || strcmp(fname, "BallID") == 0 ||
+                                       strcmp(fname, "Ballid") == 0 || strcmp(fname, "Id") == 0) {
+                                m_ballOffsets.pb_id = offset;
+                            } else if (strcmp(fname, "_pos") == 0 || strcmp(fname, "pos") == 0 ||
+                                       strcmp(fname, "position") == 0) {
+                                m_ballOffsets.pb_x = offset;
+                                m_ballOffsets.pb_y = offset + 4;
+                                m_ballOffsets.pb_z = offset + 8;
+                            } else if (strcmp(fname, "score") == 0 || strcmp(fname, "Score") == 0 ||
+                                       strcmp(fname, "weight") == 0 || strcmp(fname, "curScore") == 0) {
+                                m_ballOffsets.pb_score = offset;
+                            }
+                        }
+                        m_ballOffsets.initialized = true;
+                        APP_LOGI("ESP", "Ball(%s) 偏移: radius=0x%zu transform=0x%zu id=0x%zu x=0x%zu",
+                            cn ? cn : "?", m_ballOffsets.pb_radius, m_ballOffsets.pb_transform,
+                            m_ballOffsets.pb_id, m_ballOffsets.pb_x);
                     }
-                    if (m_offsets.pb_radius) info.radius = *(float*)((char*)pbObj + m_offsets.pb_radius);
-                    if (m_offsets.pb_score) info.score = *(int*)((char*)pbObj + m_offsets.pb_score);
-                    if (m_offsets.pb_is_alive) info.is_alive = *(bool*)((char*)pbObj + m_offsets.pb_is_alive);
-                    else info.is_alive = true;
-                    info.is_self = (effectiveSelfId > 0 && info.object_id == effectiveSelfId);
-                    info.color = GetObjectColor(info);
-
-                    if (c % 120 == 0 && i == 0) {
-                        APP_LOGI("ESP", "首Player[name=%s id=%d r=%.2f score=%d self=%d]",
-                            info.name.c_str(), info.object_id, info.radius,
-                            info.score, (int)info.is_self);
-                    }
-                    newObjects.push_back(std::move(info));
                 }
-                if (c % 120 == 0) {
-                    APP_LOGI("ESP", "PlayerDic: count=%d, 读取对象数=%zu", count, newObjects.size());
-                }
-            } else if (c % 120 == 0) {
-                APP_LOGD("ESP", "PlayerDic entries 为空 (count=%d)", count);
             }
         }
     }
+
+    // 读取球字典 (BallDic) — 用 Ball 偏移 (关键: Ball 字段布局和 PlayerBase 不同!)
+    size_t ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
+                                            m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
+    // 兼容: 读取细胞列表 (用 PlayerBase 偏移)
+    readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
 
     // 更新缓存
     {
@@ -816,296 +1258,15 @@ void ESPSystem::ReadGameObjects() {
         m_objects = std::move(newObjects);
     }
 
-    // 更新诊断状态
+    // 更新诊断状态 + 详细日志 (每 60 帧约 1 秒)
     if (c % 60 == 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "游戏就绪, 对象数=%zu", m_objects.size());
+        char buf[200];
+        snprintf(buf, sizeof(buf), "游戏就绪, 对象数=%zu (PlayerDic=%zu, BallDic=%zu, selfID=%d, cam=%d)",
+            m_objects.size(), playerCount, ballCount, effectiveSelfId,
+            m_camera.valid ? 1 : 0);
         m_diagStatus = buf;
+        APP_LOGI("ESP", "Tick: %s", buf);
     }
-}
-
-// =============================================================================
-// 查找 Ball(DrawCircle) 与 UnityEngine.Transform 类, 以及相关方法
-// 从 BallDic 第一个对象用 object_get_class 获取 DrawCircle 类;
-// 遍历程序集找 UnityEngine.Transform; 查找 get_position / get_orthographicSize
-// =============================================================================
-
-bool ESPSystem::FindBallAndTransformClasses() {
-    if (m_classBall && m_classTransform && m_methodGetPosition) return true;
-    APP_LOGI("ESP", "=== 查找 Ball(DrawCircle)/Transform 类 ===");
-
-    // 从 BallDic 第一个对象获取 DrawCircle 类
-    if (!m_classBall && m_offsets.gcc_ball_dic && m_gameInstance) {
-        void* ballDic = *(void**)((char*)m_gameInstance + m_offsets.gcc_ball_dic);
-        if (ballDic) {
-            DiscoverDicOffsets(ballDic, m_offsets, m_fn_object_get_class,
-                m_fn_class_get_fields, m_fn_field_get_name, m_fn_field_get_offset);
-            size_t eOff = m_offsets.dic_entries ? m_offsets.dic_entries : 0x18;
-            Il2CppArray* entries = *(Il2CppArray**)((char*)ballDic + eOff);
-            if (entries) {
-                size_t arrLen = m_fn_array_length(entries);
-                size_t valueOff = (12 + sizeof(void*) - 1) & ~(sizeof(void*) - 1);
-                size_t entrySize = valueOff + sizeof(void*);
-                for (size_t i = 0; i < arrLen && i < 64; i++) {
-                    char* entry = (char*)entries + kIl2CppArrayDataOffset + i * entrySize;
-                    Il2CppObject* val = *(Il2CppObject**)(entry + valueOff);
-                    if (!val) continue;
-                    Il2CppClass* bc = m_fn_object_get_class(val);
-                    if (bc) {
-                        m_classBall = bc;
-                        const char* cn = m_fn_class_get_name ? m_fn_class_get_name(bc) : "?";
-                        APP_LOGI("ESP", "✓ BallDic 首对象类 = %s (class=%p)",
-                            cn ? cn : "?", (void*)bc);
-                        InitBallFieldOffsets(bc);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // 查找 UnityEngine.Transform 类 (可能在 UnityEngine.CoreModule 等程序集)
-    if (!m_classTransform && m_domain) {
-        if (m_imageCSharp) {
-            m_classTransform = m_fn_class_from_name(m_imageCSharp, "UnityEngine", "Transform");
-        }
-        if (!m_classTransform) {
-            size_t count = 0;
-            const Il2CppAssembly** assemblies = m_fn_domain_get_assemblies(m_domain, &count);
-            for (size_t i = 0; i < count && !m_classTransform; i++) {
-                if (!assemblies[i]) continue;
-                Il2CppImage* img = m_fn_assembly_get_image(assemblies[i]);
-                if (!img) continue;
-                m_classTransform = m_fn_class_from_name(img, "UnityEngine", "Transform");
-                if (m_classTransform) {
-                    const char* imgName = m_fn_image_get_name ? m_fn_image_get_name(img) : "?";
-                    APP_LOGI("ESP", "✓ 在 %s 中找到 UnityEngine.Transform",
-                        imgName ? imgName : "?");
-                }
-            }
-        } else {
-            APP_LOGI("ESP", "✓ 找到 UnityEngine.Transform (Assembly-CSharp)");
-        }
-    }
-
-    // 查找 Transform.get_position
-    if (m_classTransform && !m_methodGetPosition) {
-        m_methodGetPosition = m_fn_class_get_method(m_classTransform, "get_position", 0);
-        APP_LOGI("ESP", "Transform.get_position = %p", (void*)m_methodGetPosition);
-    }
-
-    // 补查 Camera.get_orthographicSize (若 FindGameClasses 未找到)
-    if (m_classCamera && !m_methodGetOrthographicSize) {
-        m_methodGetOrthographicSize = m_fn_class_get_method(m_classCamera, "get_orthographicSize", 0);
-        APP_LOGI("ESP", "Camera.get_orthographicSize (补查) = %p",
-            (void*)m_methodGetOrthographicSize);
-    }
-
-    APP_LOGI("ESP", "=== Ball/Transform 查找完成: Ball=%p Transform=%p getPos=%p ===",
-        (void*)m_classBall, (void*)m_classTransform, (void*)m_methodGetPosition);
-    return (m_classBall != nullptr);
-}
-
-// =============================================================================
-// 初始化 Ball(DrawCircle) 字段偏移 — 按日志确认的字段名匹配
-// Radius@0x028, SelfTF@0xb8, ID@0x10, curScore@0x70, pos@0x170
-// =============================================================================
-
-bool ESPSystem::InitBallFieldOffsets(Il2CppClass* ballClass) {
-    if (!ballClass) return false;
-    const char* cn = m_fn_class_get_name ? m_fn_class_get_name(ballClass) : "?";
-    APP_LOGI("ESP", "--- Ball(%s) 字段 ---", cn ? cn : "?");
-    m_diagOffsets += std::string("Ball(") + (cn ? cn : "?") + "):\n";
-    void* iter = nullptr;
-    FieldInfo* field;
-    while ((field = m_fn_class_get_fields(ballClass, &iter)) != nullptr) {
-        const char* fname = m_fn_field_get_name(field);
-        size_t offset = m_fn_field_get_offset(field);
-        if (!fname) continue;
-        APP_LOGI("ESP", "  Ball.%s @ 0x%zx", fname, offset);
-        m_diagOffsets += std::string("  ") + fname + " @0x" + [&]{
-            char b[32]; snprintf(b,sizeof(b),"%zx",offset); return std::string(b);}() + "\n";
-
-        // 半径字段 (多种命名)
-        if (strcmp(fname, "Radius") == 0 || strcmp(fname, "radius") == 0 ||
-            strcmp(fname, "Size") == 0 || strcmp(fname, "size") == 0 ||
-            strcmp(fname, "mass") == 0) {
-            m_offsets.ball_radius = offset;
-        }
-        // Transform 引用字段 (用于获取世界坐标)
-        else if (strcmp(fname, "SelfTF") == 0 || strcmp(fname, "selfTF") == 0 ||
-                 strcmp(fname, "tf") == 0 || strcmp(fname, "TF") == 0 ||
-                 strcmp(fname, "transform") == 0 || strcmp(fname, "Transform") == 0 ||
-                 strcmp(fname, "selfTf") == 0 || strcmp(fname, "_transform") == 0 ||
-                 strcmp(fname, "m_Transform") == 0 || strcmp(fname, "SelfTf") == 0) {
-            m_offsets.ball_self_tf = offset;
-        }
-        // ID 字段
-        else if (strcmp(fname, "ID") == 0 || strcmp(fname, "id") == 0 ||
-                 strcmp(fname, "ballId") == 0 || strcmp(fname, "BallID") == 0 ||
-                 strcmp(fname, "Ballid") == 0 || strcmp(fname, "Id") == 0) {
-            m_offsets.ball_id = offset;
-        }
-        // 分数字段
-        else if (strcmp(fname, "curScore") == 0 || strcmp(fname, "score") == 0 ||
-                 strcmp(fname, "Score") == 0 || strcmp(fname, "weight") == 0) {
-            m_offsets.ball_score = offset;
-        }
-        // pos 字段 (Vector3, 通常值为 0, 位置在 Transform 里)
-        else if (strcmp(fname, "pos") == 0 || strcmp(fname, "Pos") == 0 ||
-                 strcmp(fname, "_pos") == 0 || strcmp(fname, "position") == 0) {
-            m_offsets.ball_pos = offset;
-        }
-    }
-    APP_LOGI("ESP", "Ball 偏移: radius=0x%zu self_tf=0x%zu id=0x%zu score=0x%zu pos=0x%zu",
-        m_offsets.ball_radius, m_offsets.ball_self_tf,
-        m_offsets.ball_id, m_offsets.ball_score, m_offsets.ball_pos);
-    return m_offsets.ball_radius != 0;
-}
-
-// =============================================================================
-// 获取 Transform 世界坐标 — 调用 Transform.get_position() via runtime_invoke
-// 返回装箱的 Vector3, 跳过对象头(16字节)读 x/y/z
-// =============================================================================
-
-bool ESPSystem::GetTransformPosition(Il2CppObject* transformObj,
-    float& outX, float& outY, float& outZ) {
-    outX = outY = outZ = 0;
-    if (!transformObj || !m_methodGetPosition || !m_fn_runtime_invoke) return false;
-
-    Il2CppException* exc = nullptr;
-    Il2CppObject* result = m_fn_runtime_invoke(m_methodGetPosition, transformObj, nullptr, &exc);
-    if (!result || exc) return false;
-
-    // 装箱的 Vector3: 跳过对象头(16字节)读取 x/y/z 三个 float
-    float* v = (float*)((char*)result + 16);
-    outX = v[0];
-    outY = v[1];
-    outZ = v[2];
-    return true;
-}
-
-// =============================================================================
-// 从 BallDic 读取球体对象 — 遍历 Dictionary._entries 数组
-// 动态查找 Dictionary 偏移 (首次), 对每个 Entry.value(DrawCircle) 调用 FillBallObject
-// =============================================================================
-
-bool ESPSystem::TryReadFromBallDic(void* dicObj, int selfPlayerId,
-    std::vector<GameObjectInfo>& out, uint32_t c) {
-    if (!dicObj) return false;
-
-    // 动态查找 Dictionary 偏移 (首次)
-    DiscoverDicOffsets(dicObj, m_offsets, m_fn_object_get_class,
-        m_fn_class_get_fields, m_fn_field_get_name, m_fn_field_get_offset);
-
-    size_t eOff = m_offsets.dic_entries ? m_offsets.dic_entries : 0x18;
-    size_t cOff = m_offsets.dic_count ? m_offsets.dic_count : 0x20;
-
-    Il2CppArray* entries = *(Il2CppArray**)((char*)dicObj + eOff);
-    int count = *(int*)((char*)dicObj + cOff);
-    if (!entries || count <= 0) return false;
-
-    size_t arrLen = m_fn_array_length(entries);
-    // Entry 布局: { hashCode(4) next(4) key(4) [pad] value }; value偏移对齐到 sizeof(void*)
-    size_t valueOff = (12 + sizeof(void*) - 1) & ~(sizeof(void*) - 1);
-    size_t entrySize = valueOff + sizeof(void*);
-
-    if (c % 120 == 0) {
-        APP_LOGI("ESP", "BallDic: count=%d entries数组长度=%zu entrySize=%zu valueOff=%zu",
-            count, arrLen, entrySize, valueOff);
-    }
-
-    size_t scanLimit = arrLen < 500 ? arrLen : 500;
-    bool added = false;
-    for (size_t i = 0; i < scanLimit; i++) {
-        char* entry = (char*)entries + kIl2CppArrayDataOffset + i * entrySize;
-        Il2CppObject* ballObj = *(Il2CppObject**)(entry + valueOff);
-        if (!ballObj) continue;
-        FillBallObject(ballObj, selfPlayerId, out, c, i);
-        added = true;
-    }
-    return added;
-}
-
-// =============================================================================
-// 填充单个球体对象信息 — 读 Radius/SelfTF(→位置)/ID/curScore
-// =============================================================================
-
-void ESPSystem::FillBallObject(Il2CppObject* ballObj, int selfPlayerId,
-    std::vector<GameObjectInfo>& out, uint32_t c, size_t idx) {
-    if (!ballObj) return;
-    GameObjectInfo info;
-
-    // 首次遇到 ball 对象时, 用 object_get_class 拿真实类并解析字段偏移
-    // 解决问题: BallDic 里的对象类名未知 (可能不叫 "Ball"),
-    //          之前 FindBallAndTransformClasses 在 BallDic 空时没找到类
-    if (m_offsets.ball_radius == 0 && m_offsets.ball_self_tf == 0) {
-        Il2CppClass* bc = m_fn_object_get_class(ballObj);
-        if (bc) {
-            const char* cn = m_fn_class_get_name ? m_fn_class_get_name(bc) : "?";
-            APP_LOGW("ESP", "Ball 偏移未初始化! 首对象类=%s, 现场解析字段...", cn ? cn : "?");
-            m_classBall = bc;
-            InitBallFieldOffsets(bc);
-            // 同时补查 Transform 类和方法 (如果还没查)
-            if (!m_methodGetPosition) {
-                FindBallAndTransformClasses();
-            }
-        }
-    }
-
-    // 读 Radius
-    if (m_offsets.ball_radius) {
-        info.radius = *(float*)((char*)ballObj + m_offsets.ball_radius);
-    }
-
-    // 读 SelfTF 并调用 Transform.get_position 获取世界坐标
-    if (m_offsets.ball_self_tf) {
-        Il2CppObject* tfObj = *(Il2CppObject**)((char*)ballObj + m_offsets.ball_self_tf);
-        if (tfObj) {
-            float tx, ty, tz;
-            if (GetTransformPosition(tfObj, tx, ty, tz)) {
-                info.world_x = tx;
-                info.world_y = ty;
-                info.world_z = tz;
-            }
-        }
-    } else if (m_offsets.ball_pos) {
-        // 备用: 直接读 pos 字段 (Vector3)
-        float* p = (float*)((char*)ballObj + m_offsets.ball_pos);
-        info.world_x = p[0];
-        info.world_y = p[1];
-        info.world_z = p[2];
-    }
-
-    // 读 ID
-    if (m_offsets.ball_id) {
-        info.object_id = *(int*)((char*)ballObj + m_offsets.ball_id);
-    }
-
-    // 读 curScore
-    if (m_offsets.ball_score) {
-        info.score = *(int*)((char*)ballObj + m_offsets.ball_score);
-    }
-
-    // 球体默认存活
-    info.is_alive = true;
-
-    // 识别自身: ball ID == selfPlayerId (回退到配置的 self_rank_id)
-    int effectiveSelfId = (selfPlayerId > 0) ? selfPlayerId : config.self_rank_id;
-    info.is_self = (effectiveSelfId > 0 && info.object_id == effectiveSelfId);
-
-    // 名称 (球体可能无名称字段, ReadObjectName 会兜底返回空串)
-    info.name = ReadObjectName(ballObj);
-
-    info.color = GetObjectColor(info);
-
-    if (c % 120 == 0 && idx == 0) {
-        APP_LOGI("ESP", "首Ball: x=%.1f y=%.1f r=%.2f id=%d score=%d self=%d name=%s",
-            info.world_x, info.world_y, info.radius, info.object_id,
-            info.score, (int)info.is_self, info.name.c_str());
-    }
-
-    out.push_back(std::move(info));
 }
 
 // =============================================================================
@@ -1113,8 +1274,7 @@ void ESPSystem::FillBallObject(Il2CppObject* ballObj, int selfPlayerId,
 // 逆向字符串: "get_name", "name=", "name=%s"
 //
 // 优先通过 il2cpp_runtime_invoke 调用 get_name(),
-// 名称存储为 IL2CPP 托管字符串, 用 string_chars + string_length 手动转 UTF16→UTF8
-// (旧版 il2cpp_string_to_utf8 符号在部分 IL2CPP 版本不可用)
+// 因为名称可能存储为 IL2CPP 托管字符串 (需要 il2cpp_string_to_utf8 转换)
 // =============================================================================
 
 std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
@@ -1125,9 +1285,10 @@ std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
         Il2CppException* exc = nullptr;
         Il2CppObject* nameObj = m_fn_runtime_invoke(m_methodGetName, obj, nullptr, &exc);
         if (nameObj && !exc) {
-            // 将 IL2CPP 托管字符串 (UTF16) 手动转换为 UTF8
-            return Il2CppStringToUtf8Impl((Il2CppString*)nameObj,
-                m_fn_string_chars, m_fn_string_length);
+            // 将 IL2CPP 托管字符串转换为 C 字符串
+            // 优先用 il2cpp_string_to_utf8, 不存在则用 chars+length 手动转
+            return Il2CppStringToUtf8((Il2CppString*)nameObj,
+                m_fn_string_to_utf8, m_fn_string_chars, m_fn_string_length);
         }
     }
 
@@ -1135,8 +1296,8 @@ std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
     if (m_offsets.pb_name) {
         Il2CppString* nameStr = *(Il2CppString**)((char*)obj + m_offsets.pb_name);
         if (nameStr) {
-            return Il2CppStringToUtf8Impl(nameStr,
-                m_fn_string_chars, m_fn_string_length);
+            return Il2CppStringToUtf8(nameStr,
+                m_fn_string_to_utf8, m_fn_string_chars, m_fn_string_length);
         }
     }
 
@@ -1209,75 +1370,24 @@ void ESPSystem::Render() {
     ImDrawList* bgDraw = ImGui::GetBackgroundDrawList();
     if (!bgDraw) return;
 
+    // 获取当前相机信息
+    CameraInfo cam = m_camera;
+    // 不再要求 cam.valid (Camera 读取可能失败), 只要屏幕尺寸有效就尝试绘制
+    if (cam.screen_w <= 0 || cam.screen_h <= 0) {
+        // 屏幕尺寸尚未初始化, 从 ImGui IO 兜底
+        ImGuiIO& io = ImGui::GetIO();
+        cam.screen_w = io.DisplaySize.x;
+        cam.screen_h = io.DisplaySize.y;
+    }
+    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底
+    if (cam.screen_w <= 0 || cam.screen_h <= 0) return;
+
     // 获取对象列表 (线程安全拷贝)
     std::vector<GameObjectInfo> objects;
     {
         std::lock_guard<std::mutex> lock(m_objectMutex);
         objects = m_objects;
     }
-
-    // 构造相机信息 (动态计算 zoom, 修复圆圈太小问题)
-    CameraInfo cam = m_camera;
-    {
-        ImGuiIO& io = ImGui::GetIO();
-        cam.screen_w = io.DisplaySize.x;
-        cam.screen_h = io.DisplaySize.y;
-
-        // 如果 zoom 无效 (< 10, 之前错误默认值 ~500 导致圆圈极小),
-        // 根据自身球体半径动态计算: agar.io 类游戏 orthographicSize ≈ 6 × playerRadius
-        // 这样自身球占屏幕高度约 1/12, 圆圈大小合适
-        if (cam.zoom < 10.0f) {
-            float selfRadius = 0;
-            for (const auto& obj : objects) {
-                if (obj.is_self && obj.radius > 0) {
-                    selfRadius = obj.radius;
-                    break;
-                }
-            }
-            if (selfRadius > 0) {
-                cam.zoom = 6.0f * selfRadius;
-            } else if (!objects.empty() && objects[0].radius > 0) {
-                cam.zoom = 6.0f * objects[0].radius;
-            } else {
-                cam.zoom = 30.0f;  // 最后兜底
-            }
-        }
-
-        // 应用用户微调 (zoom_scale>1 放大圆圈 = 减小 zoom)
-        if (config.zoom_scale > 0.01f) {
-            cam.zoom = cam.zoom / config.zoom_scale;
-        }
-
-        // 用自己对象坐标作为相机中心 (若没有自身, 用首对象)
-        bool found = false;
-        for (const auto& obj : objects) {
-            if (obj.is_self) {
-                cam.cam_x = obj.world_x;
-                cam.cam_y = obj.world_y;
-                found = true;
-                break;
-            }
-        }
-        if (!found && !objects.empty()) {
-            cam.cam_x = objects[0].world_x;
-            cam.cam_y = objects[0].world_y;
-        }
-        cam.valid = true;
-    }
-
-    // 每 120 帧打印渲染状态
-    static uint32_t s_renderLogFrame = 0;
-    if (s_renderLogFrame % 120 == 0) {
-        APP_LOGI("ESP", "Render: 对象数=%zu screen=%.0fx%.0f zoom=%.1f scale=%.2f cam=(%.1f,%.1f) draw=%d circle=%d",
-            objects.size(), cam.screen_w, cam.screen_h, cam.zoom, config.zoom_scale,
-            cam.cam_x, cam.cam_y, (int)config.draw_enabled, (int)config.show_circle);
-        if (!objects.empty()) {
-            APP_LOGI("ESP", "  首对象: x=%.1f y=%.1f r=%.2f id=%d self=%d",
-                objects[0].world_x, objects[0].world_y, objects[0].radius,
-                objects[0].object_id, (int)objects[0].is_self);
-        }
-    }
-    s_renderLogFrame++;
 
     // 遍历所有对象, 绘制 ESP
     for (const auto& obj : objects) {
@@ -1294,17 +1404,17 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
     ImDrawList* bgDraw = ImGui::GetBackgroundDrawList();
     if (!bgDraw) return;
 
-    // 世界坐标 → 屏幕坐标 (使用 Render 构造的 cam)
+    // 世界坐标 → 屏幕坐标
     float screenX, screenY;
     if (!WorldToScreen(obj.world_x, obj.world_y, screenX, screenY, cam)) {
         return; // 对象不在屏幕范围内
     }
 
-    // 计算屏幕上的半径 (世界半径 × 缩放)
+    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调)
     float scale = cam.screen_h / (2.0f * cam.zoom);
-    float screenRadius = obj.radius * scale;
+    float screenRadius = obj.radius * scale * config.circle_scale;
     if (screenRadius < 2.0f) screenRadius = 2.0f;    // 最小半径
-    if (screenRadius > 500.0f) screenRadius = 500.0f; // 最大半径
+    if (screenRadius > 2000.0f) screenRadius = 2000.0f; // 最大半径
 
     // 获取对象颜色
     ImU32 color = GetObjectColor(obj);
@@ -1320,13 +1430,15 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
             config.circle_thickness
         );
 
-        // 内部填充 (半透明)
+        // 内部填充 (半透明) — 手动提取 RGBA (此 imgui 版本无 IM_COL32_R/G/B 宏)
         bgDraw->AddCircleFilled(
             ImVec2(screenX, screenY),
             screenRadius,
             IM_COL32(
-                IM_COL32_R(color), IM_COL32_G(color),
-                IM_COL32_B(color), 30  // 低透明度填充
+                (int)((color >> IM_COL32_R_SHIFT) & 0xFF),
+                (int)((color >> IM_COL32_G_SHIFT) & 0xFF),
+                (int)((color >> IM_COL32_B_SHIFT) & 0xFF),
+                30  // 低透明度填充
             )
         );
     }
@@ -1409,9 +1521,9 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
 
     // 距离 (到自身的距离)
     if (config.show_distance) {
-        // 计算距离 (使用世界坐标, 相对当前 cam 中心)
-        float dx = obj.world_x - cam.cam_x;
-        float dy = obj.world_y - cam.cam_y;
+        // 计算距离 (使用世界坐标)
+        float dx = obj.world_x - m_camera.cam_x;
+        float dy = obj.world_y - m_camera.cam_y;
         float dist = sqrtf(dx * dx + dy * dy);
         snprintf(buf, sizeof(buf), "Dist: %.0f", dist);
         bgDraw->AddText(nullptr, 16.0f, ImVec2(infoX, infoY),
@@ -1432,7 +1544,7 @@ void ESPSystem::ApplyRename(const std::string& newName) {
     }
 
     // 查找 Rename 方法 (逆向: GameCoreCenter.Rename(string), 参数数=1)
-    MethodInfo* methodRename = m_fn_class_get_method(m_classGameCoreCenter, "Rename", 1);
+    MethodInfo* methodRename = m_fn_class_get_method_from_name(m_classGameCoreCenter, "Rename", 1);
     if (!methodRename) {
         ESP_LOGE("ESP: 未找到 GameCoreCenter.Rename 方法");
         return;
