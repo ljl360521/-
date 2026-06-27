@@ -251,6 +251,11 @@ static void DrawESPTab() {
         if (ImGui::TreeNode("参数")) {
             ImGui::SliderFloat("圆圈线宽", &cfg.circle_thickness, 0.5f, 8.0f);
             ImGui::SliderInt("圆圈分段",   &cfg.circle_segments, 6, 64);
+            ImGui::SliderFloat("缩放微调", &cfg.zoom_scale, 0.1f, 5.0f, "%.2f");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("调整圆圈大小贴合球体\n1.0=自动\n>1 放大圆圈\n<1 缩小圆圈");
             ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
             ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
             ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);

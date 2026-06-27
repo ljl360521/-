@@ -62,7 +62,8 @@ typedef Il2CppObject*        (*il2cpp_runtime_invoke_t)(MethodInfo*, Il2CppObjec
 typedef size_t               (*il2cpp_array_length_t)(Il2CppArray*);
 typedef Il2CppObject*        (*il2cpp_array_get_t)(Il2CppArray*, size_t);
 typedef Il2CppClass*         (*il2cpp_object_get_class_t)(Il2CppObject*);
-typedef const char*          (*il2cpp_string_to_utf8_t)(Il2CppString*);
+typedef const uint16_t*      (*il2cpp_string_chars_t)(const Il2CppString*);
+typedef int                  (*il2cpp_string_length_t)(const Il2CppString*);
 typedef Il2CppString*        (*il2cpp_string_new_t)(const char*);
 typedef const char*          (*il2cpp_class_get_name_t)(Il2CppClass*);
 typedef const char*          (*il2cpp_image_get_name_t)(Il2CppImage*);
@@ -135,6 +136,10 @@ struct ESPConfig {
     bool rename_enabled;
     std::string name_prefix;
 
+    // 缩放微调 (用户可拖滑块微调, 让圆圈贴合球体)
+    // 1.0 = 自动计算值, >1 放大, <1 缩小
+    float zoom_scale;
+
     ESPConfig() :
         draw_enabled(false), show_circle(true), show_name(true),
         show_tracer(false), show_id(false), show_score(false),
@@ -149,7 +154,8 @@ struct ESPConfig {
         name_font_size(20.0f), name_offset_y(25.0f),
         tracer_thickness(1.0f),
         self_rank_id(-1),
-        rename_enabled(false), name_prefix("[BOT]") {}
+        rename_enabled(false), name_prefix("[BOT]"),
+        zoom_scale(1.0f) {}
 };
 
 // =============================================================================
@@ -157,31 +163,57 @@ struct ESPConfig {
 // =============================================================================
 
 struct FieldOffsets {
-    // PlayerBase 字段偏移
-    size_t pb_name;
-    size_t pb_x;
-    size_t pb_y;
-    size_t pb_z;
-    size_t pb_radius;
-    size_t pb_id;
-    size_t pb_rank_id;
-    size_t pb_score;
-    size_t pb_is_alive;
-    size_t pb_color;
+    // PlayerBase 字段偏移 (日志确认)
+    size_t pb_name;         // Name @ 0x18
+    size_t pb_id;           // ID @ 0x10
+    size_t pb_pos;          // _pos @ 0x1b0 (Vector3, 值为0, 位置在Transform里)
+    size_t pb_pos2;         // pos @ 0x218 (值为0)
+    size_t pb_radius;       // radius @ 0x200 (值为0)
+    size_t pb_is_alive;     // isAlive @ 0x15c
+    size_t pb_score;        // AllBallScore @ 0x78
+    size_t pb_color;        // Color @ 0x28
+    size_t pb_team_id;      // TeamID @ 0x2c
 
-    // GameCoreCenter 字段偏移
-    size_t gcc_player_list;
-    size_t gcc_fish_list;
-    size_t gcc_cell_list;
-    size_t gcc_self_player;
+    // GameCoreCenter 字段偏移 (日志确认)
+    size_t gcc_player_dic;      // PlayerDic @ 0x58 (2D主)
+    size_t gcc_cached_player_dic; // CachedPlayerDic @ 0x60
+    size_t gcc_ball_dic;        // BallDic @ 0x68
+    size_t gcc_ball_update_list; // BallUpdateList @ 0x70
+    size_t gcc_person_list;     // PersonList @ 0x528 (3D)
+    size_t gcc_person_dic;      // PersonDic @ 0x520 (3D)
+    size_t gcc_self_player_id;  // SelfPlayerID @ 0x160
+    size_t gcc_cur_player_id;   // curPlayerID @ 0x890
+    size_t gcc_is_3d_room;      // Is3DRoomType @ 0x4f4
+    size_t gcc_map3d;           // Map3D @ 0x4e8
+
+    // List<T> 内部偏移
+    size_t list_items;      // _items @ 0x10
+    size_t list_size;       // _size @ 0x18
+
+    // Dictionary 内部偏移
+    size_t dic_entries;     // _entries @ 0x18
+    size_t dic_count;       // _count @ 0x20
+    size_t dic_entry_value; // Entry内value偏移 (默认16)
+
+    // Ball (DrawCircle) 字段偏移 (日志确认)
+    size_t ball_radius;     // Radius @ 0x028 (球半径, =4.54)
+    size_t ball_self_tf;    // SelfTF @ 0xb8 (Transform引用)
+    size_t ball_id;         // ID @ 0x10
+    size_t ball_score;      // curScore @ 0x70
+    size_t ball_pos;        // pos @ 0x170 (值为0, 位置在Transform里)
 
     bool initialized;
 
-    FieldOffsets() : pb_name(0), pb_x(0), pb_y(0), pb_z(0),
-        pb_radius(0), pb_id(0), pb_rank_id(0), pb_score(0),
-        pb_is_alive(0), pb_color(0),
-        gcc_player_list(0), gcc_fish_list(0), gcc_cell_list(0),
-        gcc_self_player(0), initialized(false) {}
+    FieldOffsets() : pb_name(0), pb_id(0), pb_pos(0), pb_pos2(0),
+        pb_radius(0), pb_is_alive(0), pb_score(0), pb_color(0), pb_team_id(0),
+        gcc_player_dic(0), gcc_cached_player_dic(0), gcc_ball_dic(0),
+        gcc_ball_update_list(0), gcc_person_list(0), gcc_person_dic(0),
+        gcc_self_player_id(0), gcc_cur_player_id(0),
+        gcc_is_3d_room(0), gcc_map3d(0),
+        list_items(0), list_size(0),
+        dic_entries(0), dic_count(0), dic_entry_value(16),
+        ball_radius(0), ball_self_tf(0), ball_id(0), ball_score(0), ball_pos(0),
+        initialized(false) {}
 };
 
 // =============================================================================
@@ -256,7 +288,8 @@ private:
     il2cpp_array_length_t            m_fn_array_length;
     il2cpp_array_get_t               m_fn_array_get;
     il2cpp_object_get_class_t        m_fn_object_get_class;
-    il2cpp_string_to_utf8_t          m_fn_string_to_utf8;
+    il2cpp_string_chars_t            m_fn_string_chars;
+    il2cpp_string_length_t           m_fn_string_length;
     il2cpp_string_new_t              m_fn_string_new;
     il2cpp_class_get_name_t          m_fn_class_get_name;
     il2cpp_image_get_name_t          m_fn_image_get_name;
@@ -269,6 +302,8 @@ private:
     Il2CppClass* m_classGameCoreCenter;
     Il2CppClass* m_classPlayerBase;
     Il2CppClass* m_classCamera;
+    Il2CppClass* m_classBall;       // DrawCircle (球体类)
+    Il2CppClass* m_classTransform;  // UnityEngine.Transform
     Il2CppImage* m_imageCSharp;
     Il2CppDomain* m_domain;
 
@@ -276,6 +311,8 @@ private:
     MethodInfo* m_methodGetInstance;
     MethodInfo* m_methodGetCurrent;
     MethodInfo* m_methodGetName;
+    MethodInfo* m_methodGetPosition;            // Transform.get_position
+    MethodInfo* m_methodGetOrthographicSize;    // Camera.get_orthographicSize
 
     // 字段偏移
     FieldOffsets m_offsets;
@@ -301,9 +338,14 @@ private:
     void ReadGameObjects();
     void ReadCameraInfo();
     std::string ReadObjectName(Il2CppObject* obj);
-    bool WorldToScreen(float worldX, float worldY, float& screenX, float& screenY);
+    bool WorldToScreen(float worldX, float worldY, float& screenX, float& screenY, const CameraInfo& cam);
     void DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam);
     ImU32 GetObjectColor(const GameObjectInfo& obj);
+    bool FindBallAndTransformClasses();
+    bool InitBallFieldOffsets(Il2CppClass* ballClass);
+    bool GetTransformPosition(Il2CppObject* transformObj, float& outX, float& outY, float& outZ);
+    bool TryReadFromBallDic(void* dicObj, int selfPlayerId, std::vector<GameObjectInfo>& out, uint32_t c);
+    void FillBallObject(Il2CppObject* ballObj, int selfPlayerId, std::vector<GameObjectInfo>& out, uint32_t c, size_t idx);
 };
 
 // =============================================================================
