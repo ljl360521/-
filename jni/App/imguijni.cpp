@@ -262,6 +262,11 @@ static void DrawESPTab() {
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("调整圆圈大小贴合球体\n1.0=自动\n>1 放大圆圈\n<1 缩小圆圈");
+            ImGui::SliderFloat("防闪平滑", &cfg.camera_smooth_alpha, 0.05f, 1.0f, "%.2f");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("相机数据平滑系数(EMA)\n越小越平滑(消除闪烁, 略延迟)\n越大越跟手(可能闪烁)\n0.3=推荐 1.0=关闭平滑");
             ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
             ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
             ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);

@@ -977,6 +977,28 @@ void ESPSystem::ReadCameraInfo() {
         m_camera.zoom = 30.0f;
     }
 
+    // === 闪烁修复: 相机数据 EMA 平滑 ===
+    // 根因: 渲染线程跨线程 runtime_invoke 读相机, Unity 主线程可能正在更新相机中途,
+    //       读到过渡态值 → cam_x/cam_y/zoom 每帧轻微跳变 → 圆圈位置闪烁
+    // 修复: 指数移动平均 low-pass, alpha 越小越平滑 (用户可在 UI 调, 默认 0.3)
+    {
+        float alpha = config.camera_smooth_alpha;
+        if (alpha <= 0.0f) alpha = 0.05f;       // 下限: 极平滑
+        if (alpha >= 1.0f) alpha = 1.0f;        // 上限: 关闭平滑 (原始值)
+        if (!m_camera.smooth_initialized) {
+            // 首帧直接用原始值初始化, 避免从 0 缓慢爬升
+            m_camera.smooth_cam_x = m_camera.cam_x;
+            m_camera.smooth_cam_y = m_camera.cam_y;
+            m_camera.smooth_zoom   = m_camera.zoom;
+            m_camera.smooth_initialized = true;
+        } else {
+            // EMA: smooth = smooth + alpha * (raw - smooth)
+            m_camera.smooth_cam_x += alpha * (m_camera.cam_x - m_camera.smooth_cam_x);
+            m_camera.smooth_cam_y += alpha * (m_camera.cam_y - m_camera.smooth_cam_y);
+            m_camera.smooth_zoom   += alpha * (m_camera.zoom   - m_camera.smooth_zoom);
+        }
+    }
+
     m_camera.valid = true;
 }
 
@@ -1351,17 +1373,23 @@ std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
 // =============================================================================
 
 bool ESPSystem::WorldToScreen(float worldX, float worldY, float& screenX, float& screenY, const CameraInfo& cam) {
-    if (cam.screen_w <= 0 || cam.screen_h <= 0 || cam.zoom <= 0) {
+    // 使用平滑后的相机值 (消除跨线程读到的过渡态抖动 → 修复闪烁)
+    // smooth_* 已在 ReadCameraInfo 末尾做 EMA, 首帧等于原始值, 不会引入延迟启动
+    float useCamX = cam.smooth_initialized ? cam.smooth_cam_x : cam.cam_x;
+    float useCamY = cam.smooth_initialized ? cam.smooth_cam_y : cam.cam_y;
+    float useZoom = cam.smooth_initialized ? cam.smooth_zoom   : cam.zoom;
+
+    if (cam.screen_w <= 0 || cam.screen_h <= 0 || useZoom <= 0) {
         return false;
     }
 
-    // 计算缩放比例: 屏幕高度 / (2 * 正交大小)
-    float scale = cam.screen_h / (2.0f * cam.zoom);
+    // 计算缩放比例: 屏幕高度 / (2 * 正交大小) — 用平滑后的 zoom
+    float scale = cam.screen_h / (2.0f * useZoom);
 
-    // 世界坐标 → 屏幕坐标
-    screenX = (worldX - cam.cam_x) * scale + cam.screen_w / 2.0f;
+    // 世界坐标 → 屏幕坐标 (用平滑后的相机位置)
+    screenX = (worldX - useCamX) * scale + cam.screen_w / 2.0f;
     // Y 轴翻转 (世界坐标 Y 向上, 屏幕坐标 Y 向下)
-    screenY = (cam.cam_y - worldY) * scale + cam.screen_h / 2.0f;
+    screenY = (useCamY - worldY) * scale + cam.screen_h / 2.0f;
 
     // 检查是否在屏幕范围内 (允许一定边距, 因为对象可能有半径)
     float margin = 100.0f;
@@ -1414,7 +1442,9 @@ void ESPSystem::Render() {
         cam.screen_w = io.DisplaySize.x;
         cam.screen_h = io.DisplaySize.y;
     }
-    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底
+    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底 (原始值)
+    // 平滑 zoom 兜底 (确保 smooth_* 有合理初值, 避免首帧用 0)
+    if (cam.smooth_zoom <= 0) cam.smooth_zoom = cam.zoom;
     if (cam.screen_w <= 0 || cam.screen_h <= 0) return;
 
     // 获取对象列表 (线程安全拷贝)
@@ -1445,8 +1475,9 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
         return; // 对象不在屏幕范围内
     }
 
-    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调)
-    float scale = cam.screen_h / (2.0f * cam.zoom);
+    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调) — 用平滑 zoom 与 W2S 一致
+    float useZoom = cam.smooth_initialized ? cam.smooth_zoom : cam.zoom;
+    float scale = cam.screen_h / (2.0f * useZoom);
     float screenRadius = obj.radius * scale * config.circle_scale;
     if (screenRadius < 2.0f) screenRadius = 2.0f;    // 最小半径
     if (screenRadius > 2000.0f) screenRadius = 2000.0f; // 最大半径
