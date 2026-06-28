@@ -112,11 +112,6 @@ struct ESPConfig {
     bool show_distance;         // 显示距离
     bool show_self_marker;      // 自身额外标记 (对应 draw_circle.rs 的 is_self 圈)
 
-    // 数据源开关 (修复"不贴合球体": 大鱼吃小鱼视觉看到的是球 Ball,
-    //   PlayerBase 位置是玩家质心不贴合任何单个球, 默认只画球)
-    bool draw_players;          // 画玩家 (PlayerDic, 位置=质心, 可能不贴合)
-    bool draw_balls;            // 画球 (BallDic, 位置=每个球实际位置, 贴合)
-
     // 颜色配置 (逆向: "draw_color", "name_color")
     ImU32 circle_color;         // 圆圈颜色
     ImU32 name_color;           // 名称颜色
@@ -147,17 +142,10 @@ struct ESPConfig {
     // 1.0 = 默认, >1 放大圆圈, <1 缩小圆圈
     float circle_scale;
 
-    // 相机数据平滑系数 (EMA alpha, 0~1)
-    // 闪烁根因: 渲染线程跨线程读相机读到过渡态值, 每帧轻微跳变
-    // 修复: 对 cam_x/cam_y/zoom 做指数移动平均, alpha 越小越平滑(延迟大), 越大越跟手(抖动大)
-    // 0.3 = 平滑 (默认, 消除抖动), 1.0 = 关闭平滑 (原始值, 可能闪烁)
-    float camera_smooth_alpha;
-
     ESPConfig() :
         draw_enabled(false), show_circle(true), show_name(true),
         show_tracer(false), show_id(false), show_score(false),
         show_radius(false), show_distance(false), show_self_marker(true),
-        draw_players(false), draw_balls(true),
         circle_color(IM_COL32(0, 255, 0, 255)),
         name_color(IM_COL32(255, 255, 0, 255)),
         tracer_color(IM_COL32(255, 0, 0, 128)),
@@ -169,8 +157,7 @@ struct ESPConfig {
         tracer_thickness(1.0f),
         self_rank_id(-1),
         rename_enabled(false), name_prefix("[BOT]"),
-        circle_scale(1.0f),
-        camera_smooth_alpha(0.3f) {}
+        circle_scale(1.0f) {}
 };
 
 // =============================================================================
@@ -230,19 +217,8 @@ struct CameraInfo {
     float screen_h;    // 屏幕高度
     bool  valid;       // 是否有效
 
-    // 平滑后的值 (EMA 指数移动平均, 消除跨线程 runtime_invoke 读到的过渡态抖动)
-    // 闪烁根因: 渲染线程同步调用 Camera.get_current/get_position 时,
-    //          Unity 主线程可能正在更新相机中途, 读到过渡态值 → 每帧轻微跳变 → 闪烁
-    // 修复: 对读到的原始值做低通滤波, 平滑后值用于 W2S 与绘制
-    float smooth_cam_x;
-    float smooth_cam_y;
-    float smooth_zoom;
-    bool  smooth_initialized;  // 是否已用首帧值初始化平滑状态
-
     CameraInfo() : cam_x(0), cam_y(0), zoom(30.0f),
-        screen_w(0), screen_h(0), valid(false),
-        smooth_cam_x(0), smooth_cam_y(0), smooth_zoom(30.0f),
-        smooth_initialized(false) {}
+        screen_w(0), screen_h(0), valid(false) {}
 };
 
 // =============================================================================
@@ -325,19 +301,6 @@ private:
     MethodInfo* m_methodGetInstance;
     MethodInfo* m_methodGetCurrent;
     MethodInfo* m_methodGetName;
-
-    // 相机方法缓存 (避免每帧 class_get_method_from_name 字符串查找, 减少抖动)
-    // 修复: 之前每帧重新查找相机方法, 且 orthographicSize 只读一次,
-    //       导致大鱼吃小鱼游戏中玩家变大时视野缩放变化, ESP 圆圈位置/半径错位闪烁
-    MethodInfo* m_methodGetOrthoSize;    // Camera.get_orthographicSize (每帧重读, 视野会动态变化)
-    MethodInfo* m_methodGetTransform;    // Camera.get_transform (Component.get_transform)
-    MethodInfo* m_methodGetPosition;     // Transform.get_position
-    Il2CppClass* m_classTransformCached; // Transform 类缓存 (避免每帧 object_get_class 后再查方法)
-
-    // 对象坐标读取的方法缓存 (修复闪烁: 之前每个对象都做 class_get_method_from_name
-    //   字符串查找 get_position, 几十个球每帧几十次遍历 → 帧率抖动 → 圆圈闪烁)
-    Il2CppClass* m_classObjTransformCached;  // 对象 Transform 类缓存 (所有球共享同一类)
-    MethodInfo*  m_methodObjGetPosition;     // 对象 Transform.get_position 缓存
 
     // 字段偏移
     FieldOffsets m_offsets;         // PlayerBase 偏移

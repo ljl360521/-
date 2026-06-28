@@ -18,6 +18,10 @@
 #include "elf_resolver.h"
 #include "app_log.h"
 
+// 从 imguijni.cpp 引入屏幕尺寸全局变量 (兜底: io.DisplaySize 为 0 时使用)
+extern int screenWidth;
+extern int screenHeight;
+
 // =============================================================================
 // IL2CPP 托管字符串 → UTF8 转换辅助
 // il2cpp_string_to_utf8 在部分 IL2CPP 版本不导出, 用 string_chars+string_length 兜底
@@ -84,9 +88,6 @@ ESPSystem::ESPSystem()
       m_imageCSharp(nullptr), m_imageUnityEngine(nullptr), m_domain(nullptr),
       m_methodGetInstance(nullptr), m_methodGetCurrent(nullptr),
       m_methodGetName(nullptr),
-      m_methodGetOrthoSize(nullptr), m_methodGetTransform(nullptr),
-      m_methodGetPosition(nullptr), m_classTransformCached(nullptr),
-      m_classObjTransformCached(nullptr), m_methodObjGetPosition(nullptr),
       m_gameReady(false), m_threadAttached(false), m_counter(0), m_pcounter(0),
       m_gameInstance(nullptr), m_emptyFrameCount(0) {}
 
@@ -910,93 +911,76 @@ void ESPSystem::ReadCameraInfo() {
     //   Camera.get_transform()        → Transform
     //   Transform.get_position()      → Vector3 (相机世界坐标)
 
-    // 读 orthographicSize —— 每帧重读!
-    // 修复: 大鱼吃小鱼游戏中玩家变大时相机 orthographicSize 动态增大 (视野拉远),
-    //       之前只在首帧读取导致 zoom 冻结, scale 错误 → 圆圈不贴合球体 + 闪烁
-    if (!m_methodGetOrthoSize) {
-        m_methodGetOrthoSize = m_fn_class_get_method_from_name(camClass, "get_orthographicSize", 0);
-    }
-    if (m_methodGetOrthoSize) {
-        Il2CppException* e2 = nullptr;
-        Il2CppObject* ret = m_fn_runtime_invoke(m_methodGetOrthoSize, camObj, nullptr, &e2);
-        if (ret && !e2) {
-            // 返回值是 float, 装箱为 object (Il2CppObject 头 16 字节 + float 4 字节)
-            float val = *(float*)((char*)ret + 16);
-            if (val > 0) {
-                m_camera.zoom = val;  // 每帧更新 (视野动态变化的核心)
-                static bool s_loggedOrtho = false;
-                if (!s_loggedOrtho) {
-                    APP_LOGI("ESP", "✓ Camera.orthographicSize = %.2f (每帧动态读取)", val);
-                    s_loggedOrtho = true;
-                }
-            }
-        }
-    }
-
-    // 读 transform.position (相机世界坐标) —— 用缓存方法指针
-    if (!m_methodGetTransform) {
-        m_methodGetTransform = m_fn_class_get_method_from_name(camClass, "get_transform", 0);
-    }
-    if (m_methodGetTransform) {
-        Il2CppException* e3 = nullptr;
-        Il2CppObject* transObj = m_fn_runtime_invoke(m_methodGetTransform, camObj, nullptr, &e3);
-        if (transObj && !e3) {
-            // 缓存 Transform 类 + get_position 方法 (所有 Transform 实例共享同一类)
-            if (!m_classTransformCached || !m_methodGetPosition) {
-                m_classTransformCached = m_fn_object_get_class(transObj);
-                if (m_classTransformCached) {
-                    m_methodGetPosition = m_fn_class_get_method_from_name(m_classTransformCached, "get_position", 0);
-                }
-            }
-            if (m_methodGetPosition) {
-                Il2CppException* e4 = nullptr;
-                Il2CppObject* posObj = m_fn_runtime_invoke(m_methodGetPosition, transObj, nullptr, &e4);
-                if (posObj && !e4) {
-                    // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
-                    float px = *(float*)((char*)posObj + 16);
-                    float py = *(float*)((char*)posObj + 20);
-                    m_camera.cam_x = px;
-                    m_camera.cam_y = py;
-                    static bool s_loggedPos = false;
-                    if (!s_loggedPos) {
-                        APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
-                        s_loggedPos = true;
+    // 读 orthographicSize
+    if (m_camera.zoom <= 0) {
+        MethodInfo* mGetOrtho = m_fn_class_get_method_from_name(camClass, "get_orthographicSize", 0);
+        if (mGetOrtho) {
+            Il2CppException* e2 = nullptr;
+            Il2CppObject* ret = m_fn_runtime_invoke(mGetOrtho, camObj, nullptr, &e2);
+            if (ret && !e2) {
+                // 返回值是 float, 装箱为 object (Il2CppObject 头 16 字节 + float 4 字节)
+                float val = *(float*)((char*)ret + 16);
+                if (val > 0) {
+                    m_camera.zoom = val;
+                    static bool s_loggedOrtho = false;
+                    if (!s_loggedOrtho) {
+                        APP_LOGI("ESP", "✓ Camera.orthographicSize = %.2f", val);
+                        s_loggedOrtho = true;
                     }
                 }
             }
         }
     }
 
-    // 设置屏幕尺寸 (从 ImGui IO 获取)
+    // 读 transform.position (相机世界坐标)
+    MethodInfo* mGetTransform = m_fn_class_get_method_from_name(camClass, "get_transform", 0);
+    if (mGetTransform) {
+        Il2CppException* e3 = nullptr;
+        Il2CppObject* transObj = m_fn_runtime_invoke(mGetTransform, camObj, nullptr, &e3);
+        if (transObj && !e3) {
+            Il2CppClass* transClass = m_fn_object_get_class(transObj);
+            if (transClass) {
+                MethodInfo* mGetPos = m_fn_class_get_method_from_name(transClass, "get_position", 0);
+                if (mGetPos) {
+                    Il2CppException* e4 = nullptr;
+                    Il2CppObject* posObj = m_fn_runtime_invoke(mGetPos, transObj, nullptr, &e4);
+                    if (posObj && !e4) {
+                        // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
+                        float px = *(float*)((char*)posObj + 16);
+                        float py = *(float*)((char*)posObj + 20);
+                        m_camera.cam_x = px;
+                        m_camera.cam_y = py;
+                        static bool s_loggedPos = false;
+                        if (!s_loggedPos) {
+                            APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
+                            s_loggedPos = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 设置屏幕尺寸 (从 ImGui IO 获取, 兜底用全局变量)
+    // 修复: 之前如果 resize 未调用, io.DisplaySize 为 0 → scale=0 → 圆圈极小 + 全在屏幕中心
     ImGuiIO& io = ImGui::GetIO();
     m_camera.screen_w = io.DisplaySize.x;
     m_camera.screen_h = io.DisplaySize.y;
+    // 兜底 1: 用 imguijni.cpp 的全局变量
+    if (m_camera.screen_w <= 0 || m_camera.screen_h <= 0) {
+        m_camera.screen_w = (float)screenWidth;
+        m_camera.screen_h = (float)screenHeight;
+    }
+    // 兜底 2: 常见手机分辨率 (极端情况)
+    if (m_camera.screen_w <= 0 || m_camera.screen_h <= 0) {
+        m_camera.screen_w = 1080.0f;
+        m_camera.screen_h = 2400.0f;
+        APP_LOGW("ESP", "屏幕尺寸兜底 1080x2400 (io.DisplaySize 和全局变量都为 0!)");
+    }
 
     // 如果没读到 zoom, 用经验默认值 (大鱼吃小鱼 orthographicSize 约 20-30)
     if (m_camera.zoom <= 0) {
         m_camera.zoom = 30.0f;
-    }
-
-    // === 闪烁修复: 相机数据 EMA 平滑 ===
-    // 根因: 渲染线程跨线程 runtime_invoke 读相机, Unity 主线程可能正在更新相机中途,
-    //       读到过渡态值 → cam_x/cam_y/zoom 每帧轻微跳变 → 圆圈位置闪烁
-    // 修复: 指数移动平均 low-pass, alpha 越小越平滑 (用户可在 UI 调, 默认 0.3)
-    {
-        float alpha = config.camera_smooth_alpha;
-        if (alpha <= 0.0f) alpha = 0.05f;       // 下限: 极平滑
-        if (alpha >= 1.0f) alpha = 1.0f;        // 上限: 关闭平滑 (原始值)
-        if (!m_camera.smooth_initialized) {
-            // 首帧直接用原始值初始化, 避免从 0 缓慢爬升
-            m_camera.smooth_cam_x = m_camera.cam_x;
-            m_camera.smooth_cam_y = m_camera.cam_y;
-            m_camera.smooth_zoom   = m_camera.zoom;
-            m_camera.smooth_initialized = true;
-        } else {
-            // EMA: smooth = smooth + alpha * (raw - smooth)
-            m_camera.smooth_cam_x += alpha * (m_camera.cam_x - m_camera.smooth_cam_x);
-            m_camera.smooth_cam_y += alpha * (m_camera.cam_y - m_camera.smooth_cam_y);
-            m_camera.smooth_zoom   += alpha * (m_camera.zoom   - m_camera.smooth_zoom);
-        }
     }
 
     m_camera.valid = true;
@@ -1022,18 +1006,10 @@ bool ESPSystem::ReadObjectPositionViaTransform(Il2CppObject* obj, size_t transfo
     Il2CppObject* tfObj = *(Il2CppObject**)((char*)obj + transformOffset);
     if (!tfObj) return false;
 
-    // 2. 拿 get_position 方法 —— 用缓存! (修复闪烁根因)
-    // 之前每个对象都做 object_get_class + class_get_method_from_name("get_position"),
-    // 这是字符串遍历查找, 几十个球每帧几十次 → 帧率抖动 → 圆圈闪烁
-    // 所有 Ball 的 Transform 都是同一个类 (UnityEngine.Transform), 首次查找后缓存复用
-    MethodInfo* mGetPos = m_methodObjGetPosition;
-    if (!mGetPos) {
-        Il2CppClass* tfClass = m_fn_object_get_class(tfObj);
-        if (!tfClass) return false;
-        m_classObjTransformCached = tfClass;
-        mGetPos = m_fn_class_get_method_from_name(tfClass, "get_position", 0);
-        m_methodObjGetPosition = mGetPos;  // 缓存 (后续所有对象复用)
-    }
+    // 2. 拿 Transform 类, 找 get_position 方法 (0 参数, 返回 Vector3)
+    Il2CppClass* tfClass = m_fn_object_get_class(tfObj);
+    if (!tfClass) return false;
+    MethodInfo* mGetPos = m_fn_class_get_method_from_name(tfClass, "get_position", 0);
     if (!mGetPos) return false;
 
     // 3. 调用 get_position
@@ -1222,12 +1198,8 @@ void ESPSystem::ReadGameObjects() {
     };
 
     // 读取玩家字典 (PlayerDic) — 用 PlayerBase 偏移
-    // draw_players 开关: PlayerBase 位置是玩家质心, 大鱼吃小鱼里不贴合单个球, 默认关
-    size_t playerCount = 0;
-    if (config.draw_players) {
-        playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
-                                         m_offsets.gcc_player_list, "PlayerDic", m_offsets);
-    }
+    size_t playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
+                                              m_offsets.gcc_player_list, "PlayerDic", m_offsets);
 
     // --- BallDic 动态类识别 ---
     // BallDic 里的对象类名可能不叫 "Ball" (FindGameClasses 找不到),
@@ -1291,25 +1263,19 @@ void ESPSystem::ReadGameObjects() {
     }
 
     // 读取球字典 (BallDic) — 用 Ball 偏移 (关键: Ball 字段布局和 PlayerBase 不同!)
-    // draw_balls 开关: 球是视觉实际看到的对象, 位置贴合, 默认开
-    size_t ballCount = 0;
-    if (config.draw_balls) {
-        ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
-                                       m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
-    }
+    size_t ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
+                                            m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
     // 兼容: 读取细胞列表 (用 PlayerBase 偏移)
-    if (config.draw_players) {
-        readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
-    }
+    readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
 
-    // 更新缓存 (防闪烁: 瞬时读取失败导致空列表时保留上一帧数据, 避免那一帧不画而闪烁)
+    // 更新缓存 (防闪烁: 瞬时读取失败导致空列表时保留上一帧数据)
     {
         std::lock_guard<std::mutex> lock(m_objectMutex);
         if (!newObjects.empty()) {
             m_objects = std::move(newObjects);
             m_emptyFrameCount = 0;
         } else if (++m_emptyFrameCount > 30) {
-            // 连续 30 帧 (约 0.5s) 空列表才真正清空, 处理游戏退出/切场景
+            // 连续 30 帧 (约 0.5s) 空列表才真正清空 (处理游戏退出/切场景)
             m_objects.clear();
         }
         // 否则保留 m_objects 上一帧数据, 避免单帧读取失败导致闪烁
@@ -1373,23 +1339,17 @@ std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
 // =============================================================================
 
 bool ESPSystem::WorldToScreen(float worldX, float worldY, float& screenX, float& screenY, const CameraInfo& cam) {
-    // 使用平滑后的相机值 (消除跨线程读到的过渡态抖动 → 修复闪烁)
-    // smooth_* 已在 ReadCameraInfo 末尾做 EMA, 首帧等于原始值, 不会引入延迟启动
-    float useCamX = cam.smooth_initialized ? cam.smooth_cam_x : cam.cam_x;
-    float useCamY = cam.smooth_initialized ? cam.smooth_cam_y : cam.cam_y;
-    float useZoom = cam.smooth_initialized ? cam.smooth_zoom   : cam.zoom;
-
-    if (cam.screen_w <= 0 || cam.screen_h <= 0 || useZoom <= 0) {
+    if (cam.screen_w <= 0 || cam.screen_h <= 0 || cam.zoom <= 0) {
         return false;
     }
 
-    // 计算缩放比例: 屏幕高度 / (2 * 正交大小) — 用平滑后的 zoom
-    float scale = cam.screen_h / (2.0f * useZoom);
+    // 计算缩放比例: 屏幕高度 / (2 * 正交大小)
+    float scale = cam.screen_h / (2.0f * cam.zoom);
 
-    // 世界坐标 → 屏幕坐标 (用平滑后的相机位置)
-    screenX = (worldX - useCamX) * scale + cam.screen_w / 2.0f;
+    // 世界坐标 → 屏幕坐标
+    screenX = (worldX - cam.cam_x) * scale + cam.screen_w / 2.0f;
     // Y 轴翻转 (世界坐标 Y 向上, 屏幕坐标 Y 向下)
-    screenY = (useCamY - worldY) * scale + cam.screen_h / 2.0f;
+    screenY = (cam.cam_y - worldY) * scale + cam.screen_h / 2.0f;
 
     // 检查是否在屏幕范围内 (允许一定边距, 因为对象可能有半径)
     float margin = 100.0f;
@@ -1442,9 +1402,7 @@ void ESPSystem::Render() {
         cam.screen_w = io.DisplaySize.x;
         cam.screen_h = io.DisplaySize.y;
     }
-    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底 (原始值)
-    // 平滑 zoom 兜底 (确保 smooth_* 有合理初值, 避免首帧用 0)
-    if (cam.smooth_zoom <= 0) cam.smooth_zoom = cam.zoom;
+    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底
     if (cam.screen_w <= 0 || cam.screen_h <= 0) return;
 
     // 获取对象列表 (线程安全拷贝)
@@ -1475,9 +1433,8 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
         return; // 对象不在屏幕范围内
     }
 
-    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调) — 用平滑 zoom 与 W2S 一致
-    float useZoom = cam.smooth_initialized ? cam.smooth_zoom : cam.zoom;
-    float scale = cam.screen_h / (2.0f * useZoom);
+    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调)
+    float scale = cam.screen_h / (2.0f * cam.zoom);
     float screenRadius = obj.radius * scale * config.circle_scale;
     if (screenRadius < 2.0f) screenRadius = 2.0f;    // 最小半径
     if (screenRadius > 2000.0f) screenRadius = 2000.0f; // 最大半径
