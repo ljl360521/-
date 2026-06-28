@@ -26,9 +26,6 @@ int screenHeight = 0;
 bool g_Initialized = false;
 ImGuiWindow* g_window = NULL;
 
-// 保存 ANativeWindow 以便每帧兜底获取屏幕尺寸 (修复屏幕尺寸为 0 的根因)
-static ANativeWindow* g_NativeWindow = NULL;
-
 // 前向声明 (定义在下方)
 static void EnsureAppLogInitialized();
 static void DrawESPTab();
@@ -114,23 +111,6 @@ Java_com_example_imgui_GLES3JNIView_init(JNIEnv* env, jclass cls, jobject surfac
     if (!nativeWindow) {
         __android_log_print(ANDROID_LOG_ERROR, "IMGUI", "Failed to get ANativeWindow from Surface");
         return;
-    }
-
-    // 关键修复: init 时立即从 ANativeWindow 获取屏幕尺寸
-    // 之前只在 resize() 里设置 io.DisplaySize, 如果 Java 层未调 resize 或调用晚,
-    // DisplaySize 一直是 (0,0) → scale=0 → ESP 圆圈极小 + 全在屏幕中心
-    g_NativeWindow = nativeWindow;
-    int32_t winWidth = ANativeWindow_getWidth(nativeWindow);
-    int32_t winHeight = ANativeWindow_getHeight(nativeWindow);
-    if (winWidth > 0 && winHeight > 0) {
-        screenWidth = winWidth;
-        screenHeight = winHeight;
-        io.DisplaySize = ImVec2((float)winWidth, (float)winHeight);
-        __android_log_print(ANDROID_LOG_INFO, "IMGUI",
-            "init: 屏幕尺寸 %dx%d (从 ANativeWindow 获取)", winWidth, winHeight);
-    } else {
-        __android_log_print(ANDROID_LOG_WARN, "IMGUI",
-            "init: ANativeWindow 尺寸异常 %dx%d, 将在 step 兜底", winWidth, winHeight);
     }
 
     // 初始化 ImGui 的 Android 和 OpenGL 后端
@@ -228,7 +208,7 @@ static void DrawESPTab() {
     ESPConfig& cfg = esp.config;
 
     if (ImGui::CollapsingHeader("ESP 透视")) {
-        ImGui::Checkbox("总开关", &cfg.draw_enabled);
+        ImGui::Checkbox("绘制球体", &cfg.draw_enabled);
         ImGui::SameLine();
         ImGui::TextDisabled("(游戏就绪: %s)", esp.IsGameReady() ? "是" : "否");
         ImGui::SameLine();
@@ -252,7 +232,6 @@ static void DrawESPTab() {
             ImGui::Checkbox("半径",   &cfg.show_radius);
             ImGui::Checkbox("距离",   &cfg.show_distance);
             ImGui::Checkbox("自身标记", &cfg.show_self_marker);
-            ImGui::Separator();
             ImGui::TreePop();
         }
 
@@ -277,11 +256,6 @@ static void DrawESPTab() {
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("调整圆圈大小贴合球体\n1.0=自动\n>1 放大圆圈\n<1 缩小圆圈");
-            ImGui::SliderFloat("防闪平滑", &cfg.camera_smooth_alpha, 0.05f, 1.0f, "%.2f");
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("相机数据平滑系数(EMA)\n越小越平滑(消除闪烁, 略延迟)\n越大越跟手(可能闪烁)\n0.3=推荐 1.0=关闭平滑");
             ImGui::SliderFloat("名称字号", &cfg.name_font_size, 10.0f, 40.0f);
             ImGui::SliderFloat("名称偏移", &cfg.name_offset_y, 5.0f, 60.0f);
             ImGui::SliderFloat("追踪线宽", &cfg.tracer_thickness, 0.5f, 5.0f);
@@ -411,27 +385,7 @@ JNIEXPORT void JNICALL
 Java_com_example_imgui_GLES3JNIView_step(JNIEnv* env, jobject obj) {
     if (!Config.IsWindowVisible) return;
 
-    // 关键修复: 每帧兜底确保屏幕尺寸不为 0
-    // 如果 DisplaySize 为 0 (resize 未调用或 ANativeWindow 尺寸异常),
-    // 从保存的 ANativeWindow 重新获取, 或用 screenWidth/screenHeight 全局变量兜底
     ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x <= 0 || io.DisplaySize.y <= 0) {
-        if (g_NativeWindow) {
-            int32_t w = ANativeWindow_getWidth(g_NativeWindow);
-            int32_t h = ANativeWindow_getHeight(g_NativeWindow);
-            if (w > 0 && h > 0) {
-                screenWidth = w;
-                screenHeight = h;
-                io.DisplaySize = ImVec2((float)w, (float)h);
-            }
-        }
-        if (io.DisplaySize.x <= 0 || io.DisplaySize.y <= 0) {
-            if (screenWidth > 0 && screenHeight > 0) {
-                io.DisplaySize = ImVec2((float)screenWidth, (float)screenHeight);
-            }
-        }
-    }
-
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();

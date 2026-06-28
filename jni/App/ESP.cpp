@@ -18,10 +18,6 @@
 #include "elf_resolver.h"
 #include "app_log.h"
 
-// 从 imguijni.cpp 引入屏幕尺寸全局变量 (兜底: io.DisplaySize 为 0 时使用)
-extern int screenWidth;
-extern int screenHeight;
-
 // =============================================================================
 // IL2CPP 托管字符串 → UTF8 转换辅助
 // il2cpp_string_to_utf8 在部分 IL2CPP 版本不导出, 用 string_chars+string_length 兜底
@@ -959,8 +955,24 @@ void ESPSystem::ReadCameraInfo() {
                     // Vector3 是值类型, 装箱后布局: [Il2CppObject 头 16 字节][x 4][y 4][z 4]
                     float px = *(float*)((char*)posObj + 16);
                     float py = *(float*)((char*)posObj + 20);
-                    m_camera.cam_x = px;
-                    m_camera.cam_y = py;
+
+                    // 闪烁根因修复: 轻量验证 (不做距离跳变检测!)
+                    // 之前的跳变检测会卡死相机: 首帧读 (0,0) 后, 真实位置(如500,500)被
+                    // 判定为"跳变"永久拒绝 → 相机卡在 (0,0) → 圆圈全部算到屏幕外 → 不显示
+                    //
+                    // 真正的闪烁原因: runtime_invoke 偶尔返回 NaN/Inf 或 (0,0) 异常值,
+                    // 导致那一帧 WorldToScreen 算出屏幕外坐标 → return false → 圆圈消失一帧
+                    // 修复: 只拒绝 NaN/Inf/(0,0) 这种明显无效值, 正常值直接接受
+                    bool validX = !isinf(px) && !isnan(px);
+                    bool validY = !isinf(py) && !isnan(py);
+                    // (0,0) 在大鱼吃小鱼中不会是有效相机位置 (世界很大, 相机跟随玩家)
+                    bool isZero = (px == 0.0f && py == 0.0f);
+                    if (validX && validY && !isZero) {
+                        m_camera.cam_x = px;
+                        m_camera.cam_y = py;
+                    }
+                    // 否则保留上一帧的相机位置 (避免单帧异常导致闪烁)
+
                     static bool s_loggedPos = false;
                     if (!s_loggedPos) {
                         APP_LOGI("ESP", "✓ Camera.transform.position = (%.2f, %.2f)", px, py);
@@ -971,48 +983,14 @@ void ESPSystem::ReadCameraInfo() {
         }
     }
 
-    // 设置屏幕尺寸 (从 ImGui IO 获取, 兜底用全局变量)
-    // 修复: 之前如果 resize 未调用, io.DisplaySize 为 0 → scale=0 → 圆圈极小 + 全在屏幕中心
+    // 设置屏幕尺寸 (从 ImGui IO 获取)
     ImGuiIO& io = ImGui::GetIO();
     m_camera.screen_w = io.DisplaySize.x;
     m_camera.screen_h = io.DisplaySize.y;
-    // 兜底 1: 用 imguijni.cpp 的全局变量
-    if (m_camera.screen_w <= 0 || m_camera.screen_h <= 0) {
-        m_camera.screen_w = (float)screenWidth;
-        m_camera.screen_h = (float)screenHeight;
-    }
-    // 兜底 2: 常见手机分辨率 (极端情况)
-    if (m_camera.screen_w <= 0 || m_camera.screen_h <= 0) {
-        m_camera.screen_w = 1080.0f;
-        m_camera.screen_h = 2400.0f;
-        APP_LOGW("ESP", "屏幕尺寸兜底 1080x2400 (io.DisplaySize 和全局变量都为 0!)");
-    }
 
     // 如果没读到 zoom, 用经验默认值 (大鱼吃小鱼 orthographicSize 约 20-30)
     if (m_camera.zoom <= 0) {
         m_camera.zoom = 30.0f;
-    }
-
-    // === 闪烁修复: 相机数据 EMA 平滑 ===
-    // 根因: 渲染线程跨线程 runtime_invoke 读相机, Unity 主线程可能正在更新相机中途,
-    //       读到过渡态值 → cam_x/cam_y/zoom 每帧轻微跳变 → 圆圈位置闪烁
-    // 修复: 指数移动平均 low-pass, alpha 越小越平滑 (用户可在 UI 调, 默认 0.3)
-    {
-        float alpha = config.camera_smooth_alpha;
-        if (alpha <= 0.0f) alpha = 0.05f;       // 下限: 极平滑
-        if (alpha >= 1.0f) alpha = 1.0f;        // 上限: 关闭平滑 (原始值)
-        if (!m_camera.smooth_initialized) {
-            // 首帧直接用原始值初始化, 避免从 0 缓慢爬升
-            m_camera.smooth_cam_x = m_camera.cam_x;
-            m_camera.smooth_cam_y = m_camera.cam_y;
-            m_camera.smooth_zoom   = m_camera.zoom;
-            m_camera.smooth_initialized = true;
-        } else {
-            // EMA: smooth = smooth + alpha * (raw - smooth)
-            m_camera.smooth_cam_x += alpha * (m_camera.cam_x - m_camera.smooth_cam_x);
-            m_camera.smooth_cam_y += alpha * (m_camera.cam_y - m_camera.smooth_cam_y);
-            m_camera.smooth_zoom   += alpha * (m_camera.zoom   - m_camera.smooth_zoom);
-        }
     }
 
     m_camera.valid = true;
@@ -1237,9 +1215,10 @@ void ESPSystem::ReadGameObjects() {
         return (size_t)0;
     };
 
-    // 读取玩家字典 (PlayerDic) — 用 PlayerBase 偏移
-    size_t playerCount = readFromDicOrArray(m_offsets.gcc_player_dic,
-                                             m_offsets.gcc_player_list, "PlayerDic", m_offsets);
+    // 用户要求: 只要一个"绘制球体"开关 (draw_enabled), 不需要画玩家/画球分开选项
+    // 大鱼吃小鱼视觉看到的是球 Ball, PlayerBase 是质心不贴合单个球
+    // 所以只读 BallDic, 不读 PlayerDic (减少 runtime_invoke 调用, 降低闪烁)
+    size_t playerCount = 0;  // 不再读 PlayerDic, 保持为 0
 
     // --- BallDic 动态类识别 ---
     // BallDic 里的对象类名可能不叫 "Ball" (FindGameClasses 找不到),
@@ -1303,10 +1282,9 @@ void ESPSystem::ReadGameObjects() {
     }
 
     // 读取球字典 (BallDic) — 用 Ball 偏移 (关键: Ball 字段布局和 PlayerBase 不同!)
+    // 总是读取 BallDic (受 draw_enabled 总开关控制, 不需要单独的 draw_balls 开关)
     size_t ballCount = readFromDicOrArray(m_offsets.gcc_ball_dic,
-                                           m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
-    // 兼容: 读取细胞列表 (用 PlayerBase 偏移)
-    readFromDicOrArray(0, m_offsets.gcc_cell_list, "cells", m_offsets);
+                                   m_offsets.gcc_fish_list, "BallDic", m_ballOffsets);
 
     // 更新缓存 (防闪烁: 瞬时读取失败导致空列表时保留上一帧数据, 避免那一帧不画而闪烁)
     {
@@ -1324,8 +1302,8 @@ void ESPSystem::ReadGameObjects() {
     // 更新诊断状态 + 详细日志 (每 60 帧约 1 秒)
     if (c % 60 == 0) {
         char buf[200];
-        snprintf(buf, sizeof(buf), "游戏就绪, 对象数=%zu (PlayerDic=%zu, BallDic=%zu, selfID=%d, cam=%d)",
-            m_objects.size(), playerCount, ballCount, effectiveSelfId,
+        snprintf(buf, sizeof(buf), "游戏就绪, 对象数=%zu (BallDic=%zu, selfID=%d, cam=%d)",
+            m_objects.size(), ballCount, effectiveSelfId,
             m_camera.valid ? 1 : 0);
         m_diagStatus = buf;
         APP_LOGI("ESP", "Tick: %s", buf);
@@ -1379,23 +1357,17 @@ std::string ESPSystem::ReadObjectName(Il2CppObject* obj) {
 // =============================================================================
 
 bool ESPSystem::WorldToScreen(float worldX, float worldY, float& screenX, float& screenY, const CameraInfo& cam) {
-    // 使用平滑后的相机值 (消除跨线程读到的过渡态抖动 → 修复闪烁)
-    // smooth_* 已在 ReadCameraInfo 末尾做 EMA, 首帧等于原始值, 不会引入延迟启动
-    float useCamX = cam.smooth_initialized ? cam.smooth_cam_x : cam.cam_x;
-    float useCamY = cam.smooth_initialized ? cam.smooth_cam_y : cam.cam_y;
-    float useZoom = cam.smooth_initialized ? cam.smooth_zoom   : cam.zoom;
-
-    if (cam.screen_w <= 0 || cam.screen_h <= 0 || useZoom <= 0) {
+    if (cam.screen_w <= 0 || cam.screen_h <= 0 || cam.zoom <= 0) {
         return false;
     }
 
-    // 计算缩放比例: 屏幕高度 / (2 * 正交大小) — 用平滑后的 zoom
-    float scale = cam.screen_h / (2.0f * useZoom);
+    // 计算缩放比例: 屏幕高度 / (2 * 正交大小)
+    float scale = cam.screen_h / (2.0f * cam.zoom);
 
-    // 世界坐标 → 屏幕坐标 (用平滑后的相机位置)
-    screenX = (worldX - useCamX) * scale + cam.screen_w / 2.0f;
+    // 世界坐标 → 屏幕坐标
+    screenX = (worldX - cam.cam_x) * scale + cam.screen_w / 2.0f;
     // Y 轴翻转 (世界坐标 Y 向上, 屏幕坐标 Y 向下)
-    screenY = (useCamY - worldY) * scale + cam.screen_h / 2.0f;
+    screenY = (cam.cam_y - worldY) * scale + cam.screen_h / 2.0f;
 
     // 检查是否在屏幕范围内 (允许一定边距, 因为对象可能有半径)
     float margin = 100.0f;
@@ -1448,9 +1420,7 @@ void ESPSystem::Render() {
         cam.screen_w = io.DisplaySize.x;
         cam.screen_h = io.DisplaySize.y;
     }
-    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底 (原始值)
-    // 平滑 zoom 兜底 (确保 smooth_* 有合理初值, 避免首帧用 0)
-    if (cam.smooth_zoom <= 0) cam.smooth_zoom = cam.zoom;
+    if (cam.zoom <= 0) cam.zoom = 30.0f;  // zoom 兜底
     if (cam.screen_w <= 0 || cam.screen_h <= 0) return;
 
     // 获取对象列表 (线程安全拷贝)
@@ -1481,9 +1451,8 @@ void ESPSystem::DrawObjectESP(const GameObjectInfo& obj, const CameraInfo& cam) 
         return; // 对象不在屏幕范围内
     }
 
-    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调) — 用平滑 zoom 与 W2S 一致
-    float useZoom = cam.smooth_initialized ? cam.smooth_zoom : cam.zoom;
-    float scale = cam.screen_h / (2.0f * useZoom);
+    // 计算屏幕上的半径 (世界半径 × 缩放 × 用户微调)
+    float scale = cam.screen_h / (2.0f * cam.zoom);
     float screenRadius = obj.radius * scale * config.circle_scale;
     if (screenRadius < 2.0f) screenRadius = 2.0f;    // 最小半径
     if (screenRadius > 2000.0f) screenRadius = 2000.0f; // 最大半径
