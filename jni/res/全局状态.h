@@ -73,7 +73,6 @@ extern int g_secure_surface_height;
 extern jobject g_ime_loader;
 extern bool g_ime_loaded;
 extern bool g_ime_last_want_text;
-extern bool g_ime_last_input_active;
 extern bool g_secure_skip_screenshot;
 extern char g_logInput[256];
 extern bool g_show_another_window;

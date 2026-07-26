@@ -4,7 +4,7 @@ bool ImeClearException(JNIEnv* env);
 JNIEnv* ImeGetEnv(bool* attached);
 bool ImeEnsureActivity();
 bool ImeLoadDex();
-void ImeShowKeyboard(bool show);
+bool ImeShowKeyboard(bool show);
 void ImeUpdateByImGui();
 bool MainDexLoad();
 bool CaptureCurrentClassLoader(JNIEnv* env, jclass cls);

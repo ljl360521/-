@@ -140,14 +140,9 @@ void DrawT3AuthUI()
 
     // 一比一复刻旧版登录 UI：只保留旧代码中的文字、输入框、按钮和提示。
     ImGui::Text("请输入卡密：");
+    // 键盘的唤起/收起统一交给 ImeUpdateByImGui 处理（每帧在 DrawFloatingWindow 之后运行），
+    // 这里不要再手动下发 show 并改写 g_ime_last_want_text，否则会打乱中央的边沿检测。
     if (ImGui::InputText("##pwd", kami, sizeof(kami))) {}
-    bool inputActive = ImGui::IsItemActive();
-    bool inputClicked = ImGui::IsItemClicked();
-    if ((inputClicked || (inputActive && !g_ime_last_input_active)) && !g_ime_last_want_text) {
-        ImeShowKeyboard(true);
-        g_ime_last_want_text = true;
-    }
-    g_ime_last_input_active = inputActive;
 
     bool btn = ImGui::Button("验证");
     if (btn && !g_t3_verifying) {

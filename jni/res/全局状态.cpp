@@ -68,7 +68,6 @@ int g_secure_surface_width = 0;
 int g_secure_surface_height = 0;
 bool g_ime_loaded = false;
 bool g_ime_last_want_text = false;
-bool g_ime_last_input_active = false;
 bool g_secure_skip_screenshot = false;
 int g_main_tab_index = 0;
 int g_current_theme_index = 3; // 旧项目默认：液态玻璃

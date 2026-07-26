@@ -360,31 +360,56 @@ bool ImeLoadDex()
     return true;
 }
 
-void ImeShowKeyboard(bool show)
+// 返回值表示这次调用是否真的下发到了 Java 侧。
+// dex 还没加载好、拿不到 JNIEnv、Java 抛异常时返回 false，
+// 调用方据此决定要不要保留状态以便下一帧重试。
+bool ImeShowKeyboard(bool show)
 {
-    if (!ImeLoadDex() || !g_ime_loader) return;
+    if (!ImeLoadDex() || !g_ime_loader) return false;
     bool attached = false;
     JNIEnv* env = ImeGetEnv(&attached);
-    if (!env) return;
+    if (!env) return false;
+    bool ok = false;
     jclass helperClass = ImeGetClass(env, "com.mxp.Helper");
     if (helperClass) {
         jmethodID method = env->GetStaticMethodID(helperClass, "showSoftKeyboard", "(Z)V");
-        if (method) env->CallStaticVoidMethod(helperClass, method, (jboolean)show);
+        if (method) {
+            env->CallStaticVoidMethod(helperClass, method, (jboolean)show);
+            ok = !env->ExceptionCheck();
+        }
         ImeClearException(env);
         env->DeleteLocalRef(helperClass);
     }
     if (attached) g_ime_jvm->DetachCurrentThread();
+    return ok;
 }
 
 void ImeUpdateByImGui()
 {
     if (!ImGui::GetCurrentContext()) return;
     if (!g_ime_loaded) ImeLoadDex();
-    bool want = ImGui::GetIO().WantTextInput;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool want = io.WantTextInput;
+
+    // io.WantTextInput 是 NewFrame 里依据上一帧的控件状态算出来的，比手指按下晚一帧。
+    // 因此先把"上一帧有按下"记下来，等 want 追上来之后再判断要不要补一次键盘。
+    static bool s_pressed_prev_frame = false;
+    const bool pressed_prev_frame = s_pressed_prev_frame;
+    s_pressed_prev_frame = io.MouseClicked[0];
+
     if (want != g_ime_last_want_text) {
-        ImeShowKeyboard(want);
-        g_ime_last_want_text = want;
+        // 正常的上升/下降沿。下发失败时不提交状态，下一帧会重试，
+        // 避免启动阶段 Activity/dex 尚未就绪时把第一次唤起吞掉。
+        if (ImeShowKeyboard(want)) g_ime_last_want_text = want;
+        return;
     }
+
+    // 电平没变化，但用户又按了一次而且仍然需要文本输入：
+    // 说明键盘很可能已被返回键或输入法自身收起，而 ImGui 这边输入框依旧是激活状态，
+    // 不会再产生上升沿。这里补发一次 show，保证反复点击输入框都能调起键盘。
+    // 键盘已经在显示时重复 show 是无副作用的。
+    if (want && pressed_prev_frame) ImeShowKeyboard(true);
 }
 
 bool OpenUrlByActivity(const char* url)
