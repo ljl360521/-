@@ -376,6 +376,8 @@ lbl57:
                 keyboardEditText.getText().replace(0, keyboardEditText.getText().length(), (CharSequence)KB_SENTINEL);
                 keyboardEditText.setSelection(KB_SENTINEL.length());
             }
+            keyboardEditText.setFocusableInTouchMode(true);
+            keyboardEditText.setFocusable(true);
             keyboardEditText.requestFocus();
             keyboardImm.showSoftInput((View)keyboardEditText, 2);
             keyboardActive = true;
@@ -388,6 +390,9 @@ lbl57:
             if (keyboardActive && keyboardEditText != null && keyboardImm != null) {
                 keyboardImm.hideSoftInputFromWindow(keyboardEditText.getWindowToken(), 0);
                 keyboardEditText.clearFocus();
+                keyboardEditText.setFocusableInTouchMode(false);
+                keyboardEditText.setFocusable(false);
+                activity.getWindow().getDecorView().requestFocus();
                 keyboardActive = false;
             }
         }

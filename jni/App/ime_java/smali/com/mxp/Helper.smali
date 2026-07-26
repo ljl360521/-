@@ -904,7 +904,7 @@
     :cond_77
     sget-boolean p0, Lcom/mxp/Helper;->keyboardActive:Z
 
-    if-nez p0, :cond_reassert
+    if-nez p0, :cond_99
 
     .line 177
     sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
@@ -936,7 +936,15 @@
 
     invoke-virtual {p0, v0}, Landroid/widget/EditText;->setSelection(I)V
 
-    :cond_reassert
+    :cond_99
+    sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
+
+    invoke-virtual {p0, v1}, Landroid/widget/EditText;->setFocusableInTouchMode(Z)V
+
+    sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
+
+    invoke-virtual {p0, v1}, Landroid/widget/EditText;->setFocusable(Z)V
+
     .line 179
     sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
 
@@ -1006,6 +1014,26 @@
     sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
 
     invoke-virtual {p0}, Landroid/widget/EditText;->clearFocus()V
+
+    sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
+
+    invoke-virtual {p0, v0}, Landroid/widget/EditText;->setFocusableInTouchMode(Z)V
+
+    sget-object p0, Lcom/mxp/Helper;->keyboardEditText:Landroid/widget/EditText;
+
+    invoke-virtual {p0, v0}, Landroid/widget/EditText;->setFocusable(Z)V
+
+    sget-object p0, Lcom/mxp/Helper;->activity:Landroid/app/Activity;
+
+    invoke-virtual {p0}, Landroid/app/Activity;->getWindow()Landroid/view/Window;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Landroid/view/Window;->getDecorView()Landroid/view/View;
+
+    move-result-object p0
+
+    invoke-virtual {p0}, Landroid/view/View;->requestFocus()Z
 
     .line 192
     sput-boolean v0, Lcom/mxp/Helper;->keyboardActive:Z

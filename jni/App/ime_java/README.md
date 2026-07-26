@@ -108,5 +108,56 @@ keyboardActive = true;
 哨兵文本的重置保持在 `!keyboardActive` 内，是为了不打断中文输入法正在进行的
 拼音组合；`requestFocus` / `showSoftInput` 在键盘已显示时是无副作用的空操作。
 
-对应 smali 改动（`Helper.smali`）：`if-nez p0, :cond_d7` 改为跳到新增的
-`:cond_reassert` 标签，该标签插在 `requestFocus` 之前。
+对应 smali 改动（`Helper.smali`）：原本 `if-nez p0, :cond_d7`（整块跳过）改为跳到
+`requestFocus` 之前的位置，使文本重置之后的代码在两条路径上都会执行。
+
+### 2. 键盘收起后把焦点交还，修复音量键失效
+
+音量键是靠主 dex 里 `com.example.imgui.GLES3JNIView` 的 `dispatchKeyEvent` /
+`onKeyDown` 收的。这两个都是 **View 方法，只有该 View 持有焦点时才会被调用**，
+而 `GLES3JNIView` 只在构造时和 `onAttachedToWindow()` 里 `requestFocus()` 一次，
+触摸时不会重新抢焦点。
+
+隐藏输入框一旦 `requestFocus()` 抢走焦点，`clearFocus()` 并不保证焦点回到
+`GLES3JNIView`（框架会重新做一次焦点搜索，很可能又落回这个仍然可获焦的
+EditText），于是音量键就再也收不到了。
+
+改成：
+
+```java
+// 显示时：恢复可获焦属性再抢焦点
+keyboardEditText.setFocusableInTouchMode(true);
+keyboardEditText.setFocusable(true);
+keyboardEditText.requestFocus();
+
+// 隐藏时：退出焦点候选，并让视图树重新选焦点
+keyboardEditText.clearFocus();
+keyboardEditText.setFocusableInTouchMode(false);
+keyboardEditText.setFocusable(false);
+activity.getWindow().getDecorView().requestFocus();
+```
+
+把 EditText 设为不可获焦之后再让 DecorView 重新 `requestFocus()`，它就不再是候选，
+焦点会落到 `GLES3JNIView`（它是 `focusableInTouchMode`）。
+
+> **已知残留情况**：如果输入框仍处于激活状态时用系统返回键收起键盘，native 侧
+> 收不到任何通知（`WantTextInput` 仍为 true，不会下发 hide），EditText 会继续持有
+> 焦点，此时音量键仍然无效；点一下输入框以外的地方让输入框失活即可恢复。要彻底
+> 解决需要在 Java 侧加键盘可见性监听（`OnGlobalLayoutListener` / `WindowInsets`）
+> 并回调 native，那需要新增一个类。
+
+### 关于 `volume_key_dex_data.h`（`com.mxp.VolumeKeyHelper`）
+
+这个 dex **本身是坏的**：它只包含 `VolumeKeyHelper` 一个类，但该类引用了 6 个内部类
+`VolumeKeyHelper$1` ~ `$6`，而它们**不在 dex 里**。所有入口都要 `new` 它们：
+
+- `init()` → `new VolumeKeyHelper$1()` → `NoClassDefFoundError`
+- `setEnabled()` → `new $2()`；`installCallbackIfNeeded()` → `new $6()`（Window.Callback 包装器）
+
+native 侧 `LoadVolumeDex()` / `SetVolumeScaleEnabled()` 调用后用 `ImeClearException`
+把异常清掉并照样返回成功，所以表面看不出问题，实际上**这个 helper 从来没生效过**，
+它的按键拦截一次都没装上。
+
+它原本的设计（用 `Window.Callback` 包住 `dispatchKeyEvent`）其实是**不依赖焦点**的，
+比现在依赖焦点的 `GLES3JNIView` 路径更健壮。如果以后要彻底解决音量键问题，正确方向
+是补齐这 6 个内部类让 `VolumeKeyHelper` 真正工作，而不是继续在焦点上打转。
