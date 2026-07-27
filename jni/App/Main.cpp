@@ -8,6 +8,8 @@
 #include <cstring>
 #include <string>
 #include <errno.h>
+#include <cstdlib>
+#include <fstream>
 #include "log.h"
 #include "xdl.h"
 #include "classes_dex.h"
@@ -30,37 +32,36 @@
  * 返回 false: 已初始化过（跳过重复初始化）
  */
 bool check_and_create_init_flag() {
-    // 打开标记文件，如果存在则说明已初始化过
-    int fd = open(INIT_FLAG_FILE, O_RDONLY);
-    
-    if (fd >= 0) {
-        // 文件存在 - 已初始化过
-        close(fd);
-        LOGI("⚠️  初始化标记文件已存在，跳过重复初始化");
-        return false;
-    }
-    
-    // 文件不存在 - 首次初始化，创建标记文件
-    fd = open(INIT_FLAG_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        write(fd, INIT_MARKER, strlen(INIT_MARKER));
-        close(fd);
-        LOGI("✓ 创建初始化标记文件成功");
-        return true;
-    }
-    
-    // 无法创建文件 - 可能是权限问题，使用备用机制
-    LOGW("⚠️  无法创建初始化标记文件，使用环境变量备用机制");
-    
-    // 备用方案：使用环境变量（进程内有效）
+    // 只用进程内环境变量决定是否跳过初始化。
+    // 旧逻辑把 /cache/.imgui_initialized 作为硬性判断，会在 App 下次启动时因为旧文件仍存在而永远跳过初始化。
     const char* env_val = getenv("IMGUI_INITIALIZED");
     if (env_val != nullptr && strcmp(env_val, "1") == 0) {
-        LOGI("⚠️  环境变量显示已初始化，跳过重复初始化");
+        LOGI("⚠️  当前进程已初始化，跳过重复初始化");
         return false;
     }
-    
+
     setenv("IMGUI_INITIALIZED", "1", 1);
-    LOGI("✓ 设置环境变量标记，允许初始化");
+
+    // 文件只作为诊断标记，不再作为跨进程拦截条件。
+    int fd = open(INIT_FLAG_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        char marker[128];
+        int len = snprintf(marker, sizeof(marker), "%s pid=%d", INIT_MARKER, (int)getpid());
+        if (len > 0) {
+            const char* p = marker;
+            ssize_t left = (ssize_t)strlen(marker);
+            while (left > 0) {
+                ssize_t n = write(fd, p, (size_t)left);
+                if (n <= 0) break;
+                p += n;
+                left -= n;
+            }
+        }
+        close(fd);
+        LOGI("✓ 写入初始化诊断标记成功");
+    } else {
+        LOGW("⚠️  无法写入初始化诊断标记，仅使用进程内标记");
+    }
     return true;
 }
 
@@ -70,6 +71,8 @@ bool check_and_create_init_flag() {
 JavaVM *g_JavaVM = nullptr;
 jobject g_ActivityInstance = nullptr;
 jobject g_MainLooperHandler = nullptr;
+jobject g_ImGuiDexClassLoader = nullptr;
+jclass g_ImGuiClassGlobal = nullptr;
 
 static pthread_mutex_t g_InitMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -188,6 +191,12 @@ jobject getCurrentActivityInstance() {
             activityThreadClass, 
             currentActivityThreadMethod
         );
+        if (env->ExceptionCheck() || !activityThread) {
+            env->ExceptionClear();
+            LOGE("currentActivityThread返回null");
+            env->DeleteLocalRef(activityThreadClass);
+            return nullptr;
+        }
         
         jfieldID activitiesField = env->GetFieldID(
             activityThreadClass, 
@@ -230,42 +239,44 @@ jobject getCurrentActivityInstance() {
         LOGI("找到 %d 个Activity", (int)length);
         
         jobject mainActivity = nullptr;
+        jobject fallbackActivity = nullptr;
         
         for (jsize i = 0; i < length; i++) {
             jobject record = env->GetObjectArrayElement(array, i);
+            if (!record) continue;
             jclass recordClass = env->GetObjectClass(record);
+            if (!recordClass) { env->DeleteLocalRef(record); continue; }
             
             jfieldID activityField = env->GetFieldID(recordClass, "activity", "Landroid/app/Activity;");
+            if (!activityField) env->ExceptionClear();
             
             if (activityField) {
                 jobject activity = env->GetObjectField(record, activityField);
                 if (activity) {
                     jclass activityClass = env->GetObjectClass(activity);
-                    jmethodID getClassMethod = env->GetMethodID(
-                        env->FindClass("java/lang/Object"), "getClass", "()Ljava/lang/Class;"
-                    );
+                    jclass classClass = env->FindClass("java/lang/Class");
+                    jmethodID getNameMethod = classClass ? env->GetMethodID(
+                        classClass, "getName", "()Ljava/lang/String;"
+                    ) : nullptr;
                     
-                    jclass cls = (jclass)env->CallObjectMethod(activity, getClassMethod);
-                    jmethodID getNameMethod = env->GetMethodID(
-                        env->FindClass("java/lang/Class"), "getName", "()Ljava/lang/String;"
-                    );
-                    
-                    jstring className = (jstring)env->CallObjectMethod(cls, getNameMethod);
+                    jstring className = getNameMethod ? (jstring)env->CallObjectMethod(activityClass, getNameMethod) : nullptr;
+                    if (!className) { env->ExceptionClear(); if (classClass) env->DeleteLocalRef(classClass); env->DeleteLocalRef(activityClass); env->DeleteLocalRef(activity); continue; }
                     const char* classNameStr = env->GetStringUTFChars(className, nullptr);
                     
-                    LOGI("Activity[%d] 类名: %s", (int)i, classNameStr);
+                    LOGI("Activity[%d] 类名: %s", (int)i, classNameStr ? classNameStr : "<null>");
                     
-                    if (strstr(classNameStr, "UnityPlayerActivity") != nullptr) {
-                        mainActivity = activity;
+                    if (classNameStr && strstr(classNameStr, "UnityPlayerActivity") != nullptr) {
+                        mainActivity = env->NewLocalRef(activity);
                         LOGI("✓ 找到UnityPlayerActivity");
-                    } else if (mainActivity == nullptr) {
-                        mainActivity = activity;
+                    } else if (fallbackActivity == nullptr) {
+                        fallbackActivity = env->NewLocalRef(activity);
                     }
                     
-                    env->ReleaseStringUTFChars(className, classNameStr);
+                    if (classNameStr) env->ReleaseStringUTFChars(className, classNameStr);
                     env->DeleteLocalRef(className);
-                    env->DeleteLocalRef(cls);
+                    if (classClass) env->DeleteLocalRef(classClass);
                     env->DeleteLocalRef(activityClass);
+                    env->DeleteLocalRef(activity);
                 }
             }
             
@@ -283,6 +294,8 @@ jobject getCurrentActivityInstance() {
         env->DeleteLocalRef(activityThread);
         env->DeleteLocalRef(activityThreadClass);
         
+        if (!mainActivity) mainActivity = fallbackActivity;
+        else if (fallbackActivity) env->DeleteLocalRef(fallbackActivity);
         return mainActivity;
         
     } catch (const std::exception &e) {
@@ -296,6 +309,7 @@ jobject getCurrentActivityInstance() {
 // ============================================================================
 
 bool initMainThreadHandler() {
+    if (g_MainLooperHandler) return true;
     LOGI("初始化主线程Handler");
     
     if (!g_ActivityInstance) {
@@ -330,6 +344,14 @@ bool initMainThreadHandler() {
         );
         
         jobject handler = env->NewObject(handlerClass, handlerConstructor, mainLooper);
+        if (env->ExceptionCheck() || !handler) {
+            env->ExceptionClear();
+            LOGE("创建Handler失败");
+            env->DeleteLocalRef(handlerClass);
+            env->DeleteLocalRef(mainLooper);
+            env->DeleteLocalRef(looperClass);
+            return false;
+        }
         g_MainLooperHandler = env->NewGlobalRef(handler);
         
         LOGI("✓ Handler初始化成功");
@@ -395,16 +417,18 @@ std::string releaseDexFile() {
         }
         
         if (classes_dex_len > 0 && classes_dex != nullptr) {
-            ssize_t written = write(fd, classes_dex, classes_dex_len);
-            
-            if (written != (ssize_t)classes_dex_len) {
-                LOGE("写入Dex失败: 期望 %u 字节，实际写入 %zd 字节", 
-                     classes_dex_len, written);
-                close(fd);
-                return "";
+            size_t totalWritten = 0;
+            while (totalWritten < (size_t)classes_dex_len) {
+                ssize_t written = write(fd, classes_dex + totalWritten, (size_t)classes_dex_len - totalWritten);
+                if (written <= 0) {
+                    LOGE("写入Dex失败: %s", strerror(errno));
+                    close(fd);
+                    return "";
+                }
+                totalWritten += (size_t)written;
             }
             
-            LOGI("✓ Dex已写入: %zd 字节", written);
+            LOGI("✓ Dex已写入: %zu 字节", totalWritten);
         } else {
             LOGE("classes_dex为空或长度为0");
             close(fd);
@@ -474,17 +498,24 @@ jclass loadImGuiClassFromDex() {
             return nullptr;
         }
         
-        jclass classClass = env->FindClass("java/lang/Class");
-        jmethodID getClassLoaderMethod = env->GetMethodID(
-            classClass, "getClassLoader", "()Ljava/lang/ClassLoader;"
-        );
+        jclass activityClass = env->GetObjectClass(g_ActivityInstance);
+        jmethodID getClassLoaderMethod = activityClass ? env->GetMethodID(
+            activityClass, "getClassLoader", "()Ljava/lang/ClassLoader;"
+        ) : nullptr;
+        jobject parentClassLoader = getClassLoaderMethod ? env->CallObjectMethod(g_ActivityInstance, getClassLoaderMethod) : nullptr;
+        if (env->ExceptionCheck() || !parentClassLoader) {
+            env->ExceptionClear();
+            LOGE("获取Activity ClassLoader失败");
+            if (activityClass) env->DeleteLocalRef(activityClass);
+            env->DeleteLocalRef(dexClassLoaderClass);
+            return nullptr;
+        }
         
-        jobject parentClassLoader = env->CallObjectMethod(
-            env->FindClass("java/lang/Object"), getClassLoaderMethod
-        );
-        
+        std::string optimizedDirPath = dexPath;
+        size_t slashPos = optimizedDirPath.find_last_of('/');
+        optimizedDirPath = (slashPos == std::string::npos) ? "." : optimizedDirPath.substr(0, slashPos);
         jstring dexPathStr = env->NewStringUTF(dexPath.c_str());
-        jstring optimizedDir = env->NewStringUTF("");
+        jstring optimizedDir = env->NewStringUTF(optimizedDirPath.c_str());
         jstring libraryPath = env->NewStringUTF("");
         
         jobject dexClassLoader = env->NewObject(
@@ -495,16 +526,38 @@ jclass loadImGuiClassFromDex() {
         if (!dexClassLoader) {
             env->ExceptionClear();
             LOGE("创建DexClassLoader失败");
+            if (libraryPath) env->DeleteLocalRef(libraryPath);
+            if (optimizedDir) env->DeleteLocalRef(optimizedDir);
+            if (dexPathStr) env->DeleteLocalRef(dexPathStr);
+            if (parentClassLoader) env->DeleteLocalRef(parentClassLoader);
+            if (activityClass) env->DeleteLocalRef(activityClass);
+            env->DeleteLocalRef(dexClassLoaderClass);
             return nullptr;
         }
         
         LOGI("✓ DexClassLoader创建成功");
+        if (!g_ImGuiDexClassLoader) {
+            g_ImGuiDexClassLoader = env->NewGlobalRef(dexClassLoader);
+            LOGI("✓ 已保存主界面DexClassLoader全局引用: %p", g_ImGuiDexClassLoader);
+        }
         
         LOGI("加载ImGui类...");
         
         jmethodID loadClassMethod = env->GetMethodID(
             dexClassLoaderClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;"
         );
+        if (!loadClassMethod) {
+            env->ExceptionClear();
+            LOGE("找不到DexClassLoader.loadClass方法");
+            env->DeleteLocalRef(libraryPath);
+            env->DeleteLocalRef(optimizedDir);
+            env->DeleteLocalRef(dexPathStr);
+            env->DeleteLocalRef(dexClassLoader);
+            env->DeleteLocalRef(parentClassLoader);
+            if (activityClass) env->DeleteLocalRef(activityClass);
+            env->DeleteLocalRef(dexClassLoaderClass);
+            return nullptr;
+        }
         
         jstring classNameStr = env->NewStringUTF("com.example.imgui.ImGui");
         jclass imguiClass = (jclass)env->CallObjectMethod(
@@ -519,22 +572,29 @@ jclass loadImGuiClassFromDex() {
             env->DeleteLocalRef(optimizedDir);
             env->DeleteLocalRef(dexPathStr);
             env->DeleteLocalRef(dexClassLoader);
-            env->DeleteLocalRef(classClass);
+            env->DeleteLocalRef(parentClassLoader);
+            if (activityClass) env->DeleteLocalRef(activityClass);
             env->DeleteLocalRef(dexClassLoaderClass);
             return nullptr;
         }
         
         LOGI("✓ ImGui类加载成功: %p", imguiClass);
+        if (!g_ImGuiClassGlobal) {
+            g_ImGuiClassGlobal = (jclass)env->NewGlobalRef(imguiClass);
+            LOGI("✓ 已保存主界面ImGui Class全局引用: %p", g_ImGuiClassGlobal);
+        }
         
         env->DeleteLocalRef(classNameStr);
         env->DeleteLocalRef(libraryPath);
         env->DeleteLocalRef(optimizedDir);
         env->DeleteLocalRef(dexPathStr);
         env->DeleteLocalRef(dexClassLoader);
-        env->DeleteLocalRef(classClass);
+        env->DeleteLocalRef(parentClassLoader);
+        if (activityClass) env->DeleteLocalRef(activityClass);
         env->DeleteLocalRef(dexClassLoaderClass);
+        env->DeleteLocalRef(imguiClass);
         
-        return imguiClass;
+        return g_ImGuiClassGlobal;
         
     } catch (const std::exception &e) {
         LOGE("异常: %s", e.what());
@@ -690,6 +750,35 @@ bool callImGuiSetupView(jclass imguiClass) {
     }
 }
 
+
+extern "C" bool ImGui_SetSecureMode_FromMainDex(bool enable) {
+    if (!g_ImGuiClassGlobal) {
+        LOGE("主界面 ImGui Class 全局引用为空，无法调用 setSecureMode");
+        return false;
+    }
+    JNIEnv *env = getJNIEnv();
+    if (!env) {
+        LOGE("无法获取JNI环境调用 setSecureMode");
+        return false;
+    }
+    env->ExceptionClear();
+    jmethodID method = env->GetStaticMethodID(g_ImGuiClassGlobal, "setSecureMode", "(Z)Z");
+    if (!method) {
+        LOGE("找不到 ImGui.setSecureMode(boolean) 方法");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jboolean ok = env->CallStaticBooleanMethod(g_ImGuiClassGlobal, method, (jboolean)enable);
+    if (env->ExceptionCheck()) {
+        LOGE("调用 ImGui.setSecureMode 时发生异常");
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return false;
+    }
+    LOGI("ImGui.setSecureMode(%d) 返回: %d", enable ? 1 : 0, ok ? 1 : 0);
+    return ok == JNI_TRUE;
+}
+
 // ============================================================================
 // Native 线程入口 - 【关键改进】
 // ============================================================================
@@ -704,16 +793,23 @@ void* native_thread_func(void *arg) {
     LOGI("========== Native线程启动 ==========");
     LOGI("Dex大小: %u 字节", classes_dex_len);
     
-    // 1. 获取JavaVM
-    if (!getJavaVMViaReflection()) {
+    // 1. 获取JavaVM：部分机型 so 构造函数执行较早，循环等待比固定 sleep 更稳。
+    bool jvmOk = false;
+    for (int i = 0; i < 50; ++i) {
+        if (getJavaVMViaReflection()) { jvmOk = true; break; }
+        usleep(200 * 1000);
+    }
+    if (!jvmOk) {
         LOGE("❌ 获取JavaVM失败");
         return nullptr;
     }
     
-    sleep(2);
-    
-    // 2. 获取Activity实例
-    jobject activityLocal = getCurrentActivityInstance();
+    // 2. 获取Activity实例：等待前台 Activity 创建完成，避免只睡固定时间导致偶发失败。
+    jobject activityLocal = nullptr;
+    for (int i = 0; i < 50 && !activityLocal; ++i) {
+        activityLocal = getCurrentActivityInstance();
+        if (!activityLocal) usleep(200 * 1000);
+    }
     if (!activityLocal) {
         LOGE("❌ 获取Activity失败");
         return nullptr;
@@ -734,14 +830,12 @@ void* native_thread_func(void *arg) {
     }
     
     LOGI("✓ 成功获取并保存Activity全局引用: %p", g_ActivityInstance);
-    sleep(1);
     
     // 3. 初始化Handler
     if (!initMainThreadHandler()) {
         LOGE("❌ 初始化Handler失败");
         return nullptr;
     }
-    sleep(1);
     
     // 4. 加载ImGui类
     jclass imguiClass = loadImGuiClassFromDex();
@@ -749,7 +843,6 @@ void* native_thread_func(void *arg) {
         LOGE("❌ 加载ImGui类失败");
         return nullptr;
     }
-    sleep(1);
     
     // 5. 提取自身.so文件
     if (g_ActivityInstance) {
@@ -765,7 +858,6 @@ void* native_thread_func(void *arg) {
             }
         }
     }
-    sleep(1);
     
     // 6. 调用ImGui.setupImGuiViewOnMainThread()
     if (!callImGuiSetupView(imguiClass)) {

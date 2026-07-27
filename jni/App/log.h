@@ -13,8 +13,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sys/stat.h>
-
-using namespace std;
+#include <cerrno>
+#include <cstdio>
+#include <pthread.h>
 
 #define NDK_LOG true
 #define LOG_TO_FILE true  // 是否输出到文件
@@ -24,6 +25,7 @@ using namespace std;
 
 // 创建目录
 static bool createDirectory(const std::string& path) {
+    if (path.empty()) return false;
     size_t pos = 0;
     std::string dir;
     
@@ -95,6 +97,14 @@ static void writeToLogFile(int level, const char* tag, const char* message) {
                 createDirectory(dirPath);
             }
             
+            // 日志轮转：避免长期运行导致日志文件无限增大。
+            struct stat stat_buf;
+            if (stat(logPath.c_str(), &stat_buf) == 0 && stat_buf.st_size > 10 * 1024 * 1024) {
+                std::string oldPath = logPath + ".old";
+                remove(oldPath.c_str());
+                rename(logPath.c_str(), oldPath.c_str());
+            }
+
             // 打开日志文件（追加模式）
             logFile.open(logPath, std::ios::app | std::ios::out);
             if (logFile.is_open()) {
