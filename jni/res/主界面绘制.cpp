@@ -9,6 +9,7 @@
 #include "音量键缩放.h"
 #include "卡密验证.h"
 #include "音频标签页.h"
+#include "液态玻璃.h"
 #include "游戏函数调用.h"
 #include "res/ImGenie.h"
 #include "res/ImCoolBar.h"
@@ -220,6 +221,13 @@ void DrawOldMainUI()
                 ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "未激活");
             }
             ImGui::Separator();
+            ImGui::EndTabItem();
+        }
+
+        // ---------- 液态玻璃 ----------
+        // index 必须唯一（说明=0 内存=1 设置=2 日志=3 音频播放=4），与书写顺序无关。
+        if (BeginMainTabItem("液态玻璃", 5)) {
+            DrawLiquidGlassTab();
             ImGui::EndTabItem();
         }
 
